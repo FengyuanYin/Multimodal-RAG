@@ -1243,6 +1243,7 @@ select option { background: #121a33; color: var(--text); }
 .web-result-fetch { margin-left: 24px; }
 .web-fetch-selected { align-self: flex-end; }
 .error-text { color: var(--danger, #f87171); }
+.field-error { margin: 6px 0 0; color: #fda4af; font-size: 12px; line-height: 1.45; }
 
 /* 知识库条目列表：类型标记 + URL */
 .doc-title-wrap { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }

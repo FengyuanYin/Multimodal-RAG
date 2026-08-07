@@ -18,9 +18,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 import httpx
 import asyncio
+import base64
+import io
 import ipaddress
+import json
+import mimetypes
 import os
 import socket
+import zipfile
+from pathlib import PurePosixPath
+from urllib.parse import unquote
 from urllib.parse import urljoin, urlsplit
 
 app = FastAPI(title="PDF Chat Proxy")
@@ -34,14 +41,25 @@ app.add_middleware(
     allow_origins=_ALLOWED_ORIGINS,
     allow_credentials=False,
     allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Content-Type", "X-API-Key"],
+    allow_headers=["Content-Type", "X-API-Key", "X-File-Name"],
 )
+
+
+@app.middleware("http")
+async def allow_local_network_preflight(request: Request, call_next):
+    """允许受信任 Pages Origin 在用户授权后访问本机代理。"""
+    response = await call_next(request)
+    if request.headers.get("access-control-request-private-network", "").lower() == "true":
+        response.headers["Access-Control-Allow-Private-Network"] = "true"
+    return response
 
 _TIMEOUT = httpx.Timeout(120.0, connect=10.0)
 _FETCH_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 _MAX_FETCH_BYTES = 2 * 1024 * 1024  # 网页抓取大小上限 2MB
 _MAX_REQUEST_BYTES = 10 * 1024 * 1024
 _MAX_STREAM_BYTES = 32 * 1024 * 1024
+_MAX_MINERU_FILE_BYTES = 50 * 1024 * 1024
+_MAX_MINERU_ARCHIVE_BYTES = 64 * 1024 * 1024
 _ALLOW_PRIVATE = os.getenv("AGR_PROXY_ALLOW_PRIVATE", "").lower() in {"1", "true", "yes"}
 _ALLOWED_TARGET_HOSTS = {item.strip().lower() for item in os.getenv("AGR_PROXY_ALLOWED_HOSTS", "").split(",") if item.strip()}
 
@@ -373,49 +391,177 @@ async def _search_tavily(query: str, api_key: str, max_results: int) -> list:
     ]
 
 
-# ── MinerU 官方 API 转发（https://mineru.net/api/v4） ──
-# 前端将 API Key 放在 X-API-Key 头，代理转发为 Authorization: Bearer
+# ── MinerU 官方 API 适配器 ──
+# GitHub Pages 不能直接调用 MinerU（官方端点无浏览器 CORS）。代理按官方流程执行：
+# 申请预签名 URL → 上传文件 → 轮询 batch → 下载并规范化结果。
+
+_MINERU_API_BASE = "https://mineru.net/api/v4"
 
 
-async def _forward_mineru(request: Request, path: str):
-    body = await request.body()
-    if len(body) > _MAX_REQUEST_BYTES:
-        return JSONResponse({"error": "请求体超过 10MB 上限"}, status_code=413)
-    api_key = request.headers.get("X-API-Key")
-    headers = dict(request.headers)
-    headers.pop("host", None)
-    headers.pop("x-api-key", None)
-    headers["authorization"] = f"Bearer {api_key or ''}"
-    url = f"https://mineru.net/api/v4{path}"
+def _mineru_message(payload: dict, fallback: str) -> str:
+    message = str(payload.get("msg") or payload.get("message") or fallback)
+    return message[:300]
+
+
+async def _read_limited(response: httpx.Response, limit: int) -> bytes:
+    chunks = []
+    total = 0
+    async for chunk in response.aiter_bytes():
+        total += len(chunk)
+        if total > limit:
+            raise ValueError("MinerU 结果压缩包超过 64MB 上限")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _extract_mineru_archive(archive: bytes) -> dict:
+    """从官方 ZIP 中优先读取 content_list，保留页码、表格和受限图片。"""
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(180.0, connect=10.0)) as client:
-            resp = await client.request(
-                request.method,
-                url,
-                content=body,
-                headers=headers,
+        bundle = zipfile.ZipFile(io.BytesIO(archive))
+    except zipfile.BadZipFile as exc:
+        raise ValueError("MinerU 返回的结果不是有效 ZIP") from exc
+
+    infos = [item for item in bundle.infolist() if not item.is_dir()]
+    if sum(item.file_size for item in infos) > _MAX_MINERU_ARCHIVE_BYTES:
+        raise ValueError("MinerU 解压后内容超过 64MB 上限")
+    names = {item.filename: item for item in infos}
+    content_name = next((name for name in names if name.endswith("_content_list.json")), None)
+    pages = {}
+    media = []
+    image_total = 0
+
+    if content_name:
+        try:
+            content_items = json.loads(bundle.read(content_name).decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("MinerU content_list.json 无法解析") from exc
+        image_seq = 0
+        for item in content_items if isinstance(content_items, list) else []:
+            page = max(1, int(item.get("page_idx", 0)) + 1)
+            kind = str(item.get("type") or "text").lower()
+            text = str(item.get("text") or item.get("table_body") or item.get("latex") or "").strip()
+            captions = item.get("img_caption") or item.get("table_caption") or []
+            if isinstance(captions, list):
+                caption = " ".join(str(value) for value in captions if value)
+            else:
+                caption = str(captions or "")
+            if kind == "table" and text:
+                text = f"{caption}\n{text}".strip()
+            elif caption and caption not in text:
+                text = f"{caption}\n{text}".strip()
+            if text:
+                pages.setdefault(page, []).append(text)
+
+            image_path = str(item.get("img_path") or "").replace("\\", "/")
+            if kind == "image" and image_path:
+                archive_path = str(PurePosixPath(content_name).parent / image_path)
+                if archive_path not in names and image_path in names:
+                    archive_path = image_path
+                info = names.get(archive_path)
+                if info and info.file_size <= 4 * 1024 * 1024 and image_total + info.file_size <= 12 * 1024 * 1024:
+                    raw = bundle.read(archive_path)
+                    mime = mimetypes.guess_type(archive_path)[0] or "image/png"
+                    image_seq += 1
+                    image_total += len(raw)
+                    media.append({
+                        "id": f"mineru_image_{image_seq}_p{page}",
+                        "page": page,
+                        "label": f"图{image_seq}",
+                        "type": "image",
+                        "num": image_seq,
+                        "dataUrl": f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}",
+                        "caption": caption,
+                        "quality": "exact",
+                        "extractionMethod": "mineru_official_v4",
+                    })
+
+    if not pages:
+        markdown_names = [name for name in names if name.lower().endswith(".md")]
+        if not markdown_names:
+            raise ValueError("MinerU 结果中没有 Markdown 或 content_list.json")
+        markdown_name = max(markdown_names, key=lambda name: names[name].file_size)
+        markdown = bundle.read(markdown_name).decode("utf-8", errors="replace").strip()
+        if not markdown:
+            raise ValueError("MinerU 返回的 Markdown 为空")
+        pages[1] = [markdown]
+
+    return {
+        "pages": [{"page": page, "text": "\n\n".join(parts)} for page, parts in sorted(pages.items())],
+        "media": media,
+    }
+
+
+@app.post("/proxy/mineru/parse")
+async def proxy_mineru_parse(request: Request):
+    api_key = (request.headers.get("X-API-Key") or "").strip()
+    if not api_key:
+        return JSONResponse({"error": "缺少 MinerU API Key"}, status_code=401)
+    body = await request.body()
+    if not body:
+        return JSONResponse({"error": "PDF 文件为空"}, status_code=400)
+    if len(body) > _MAX_MINERU_FILE_BYTES:
+        return JSONResponse({"error": "PDF 超过代理 50MB 上限"}, status_code=413)
+    filename = unquote(request.headers.get("X-File-Name") or "document.pdf")
+    filename = os.path.basename(filename.replace("\\", "/"))[:180]
+    if not filename.lower().endswith(".pdf"):
+        return JSONResponse({"error": "MinerU 解析仅接受 PDF 文件"}, status_code=415)
+
+    auth = {"Authorization": f"Bearer {api_key}"}
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0)) as client:
+            create = await client.post(
+                f"{_MINERU_API_BASE}/file-urls/batch",
+                headers=auth,
+                json={
+                    "files": [{"name": filename, "data_id": os.urandom(12).hex()}],
+                    "model_version": "vlm",
+                    "enable_formula": True,
+                    "enable_table": True,
+                    "language": "ch",
+                },
             )
-        return JSONResponse(
-            status_code=resp.status_code,
-            content=resp.json() if resp.content else {"error": "empty response"},
-        )
-    except httpx.HTTPError as e:
-        return JSONResponse({"error": f"MinerU 代理请求失败: {e}"}, status_code=502)
+            create_payload = create.json() if create.content else {}
+            if create.status_code >= 400 or create_payload.get("code") not in (None, 0):
+                return JSONResponse({"error": _mineru_message(create_payload, "MinerU 创建上传任务失败")}, status_code=502)
+            data = create_payload.get("data") or {}
+            batch_id = data.get("batch_id")
+            upload_urls = data.get("file_urls") or []
+            if not batch_id or not upload_urls:
+                return JSONResponse({"error": "MinerU 未返回 batch_id 或上传地址"}, status_code=502)
 
+            upload = await client.put(upload_urls[0], content=body)
+            if upload.status_code >= 400:
+                return JSONResponse({"error": f"上传 PDF 到 MinerU 存储失败（HTTP {upload.status_code}）"}, status_code=502)
 
-@app.post("/proxy/mineru/extract/task")
-async def proxy_mineru_create_task(request: Request):
-    return await _forward_mineru(request, "/extract/task")
+            deadline = asyncio.get_running_loop().time() + 300
+            result_item = None
+            while asyncio.get_running_loop().time() < deadline:
+                await asyncio.sleep(2)
+                status = await client.get(f"{_MINERU_API_BASE}/extract-results/batch/{batch_id}", headers=auth)
+                status_payload = status.json() if status.content else {}
+                if status.status_code >= 400 or status_payload.get("code") not in (None, 0):
+                    return JSONResponse({"error": _mineru_message(status_payload, "MinerU 查询解析状态失败")}, status_code=502)
+                results = (status_payload.get("data") or {}).get("extract_result") or []
+                result_item = results[0] if results else None
+                state = str((result_item or {}).get("state") or "").lower()
+                if state == "done":
+                    break
+                if state == "failed":
+                    return JSONResponse({"error": str(result_item.get("err_msg") or "MinerU 解析失败")[:300]}, status_code=422)
+            else:
+                return JSONResponse({"error": "MinerU 解析超过 5 分钟，请稍后重试"}, status_code=504)
 
-
-@app.get("/proxy/mineru/extract/task/{task_id}")
-async def proxy_mineru_task_status(task_id: str, request: Request):
-    return await _forward_mineru(request, f"/extract/task/{task_id}")
-
-
-@app.get("/proxy/mineru/extract/result/{task_id}")
-async def proxy_mineru_result(task_id: str, request: Request):
-    return await _forward_mineru(request, f"/extract/result/{task_id}")
+            archive_url = (result_item or {}).get("full_zip_url")
+            if not archive_url:
+                return JSONResponse({"error": "MinerU 已完成但未返回结果下载地址"}, status_code=502)
+            async with client.stream("GET", archive_url) as archive_response:
+                archive_response.raise_for_status()
+                archive = await _read_limited(archive_response, _MAX_MINERU_ARCHIVE_BYTES)
+        return JSONResponse(_extract_mineru_archive(archive))
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+    except (httpx.HTTPError, zipfile.BadZipFile):
+        return JSONResponse({"error": "MinerU 上游请求或结果下载失败"}, status_code=502)
 
 
 @app.get("/proxy/health")
