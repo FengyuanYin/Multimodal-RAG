@@ -61,7 +61,7 @@ const Settings = {
   load() {
     try {
       return JSON.parse(localStorage.getItem(this.KEY) || "{}");
-    } catch {
+    } catch (e) {
       return {};
     }
   },
@@ -78,7 +78,7 @@ const Store = {
     try {
       const v = JSON.parse(localStorage.getItem(this.CATS_KEY) || "[]");
       return Array.isArray(v) ? v : [];
-    } catch {
+    } catch (e) {
       return [];
     }
   },
@@ -89,7 +89,7 @@ const Store = {
     try {
       const v = JSON.parse(localStorage.getItem(this.DOCS_KEY) || "[]");
       return Array.isArray(v) ? v : [];
-    } catch {
+    } catch (e) {
       return [];
     }
   },
@@ -208,7 +208,7 @@ async function buildVectors(chunks, settings) {
     const vecs = await embedTexts(batch, settings);
     all.push(...vecs);
   }
-  const dim = all[0]?.length || 0;
+  const dim = (all[0] && all[0].length) || 0;
   const vectors = new Float32Array(chunks.length * dim);
   const norm = new Float32Array(chunks.length);
   for (let i = 0; i < chunks.length; i++) {
@@ -376,8 +376,8 @@ function isDirectAnswerable(q) {
     /^(你好|您好|hi|hello|hey|嗨|哈喽|早上好|晚上好|下午好)[!！。.\s]*$/,
     /^(谢谢|感谢|多谢|thanks|thank you|thx)[!！。.\s]*$/i,
     /^(再见|拜拜|bye|goodbye)[!！。.\s]*$/i,
-    /^(你是谁|你是什么|介绍一下你自己|介绍下你自己|what are you|who are you)\b?/i,
-    /^(你能做什么|你能干什么|你会什么|可以做什么|what can you do)\b?/i,
+    /^(你是谁|你是什么|介绍一下你自己|介绍下你自己|what are you|who are you)/i,
+    /^(你能做什么|你能干什么|你会什么|可以做什么|what can you do)/i,
   ];
   return patterns.some((re) => re.test(t));
 }
@@ -406,7 +406,9 @@ async function askLLM(settings, systemPrompt, userContent) {
     throw new Error(`LLM API ${resp.status}: ${err.slice(0, 300)}`);
   }
   const data = await resp.json();
-  return data.choices?.[0]?.message?.content ?? "";
+  const choice = data.choices && data.choices[0];
+  const msg = choice && choice.message;
+  return (msg && msg.content) || "";
 }
 
 /* ───────────────────────── 设置表单 ───────────────────────── */
@@ -724,7 +726,8 @@ async function handleAsk(question) {
 
     // 3. 检索（按对话页选择的分类过滤）
     const filter = chatCatFilter();
-    const scopeName = $("chatCat").selectedOptions[0]?.text || "全部文档";
+    const scopeSel = $("chatCat");
+    const scopeName = (scopeSel.selectedOptions && scopeSel.selectedOptions[0] && scopeSel.selectedOptions[0].text) || "全部文档";
     const qTokens = tokenize(question);
     const bm25Hits = State.bm25 ? State.bm25.search(qTokens, settings.topK * 2, filter) : [];
 
