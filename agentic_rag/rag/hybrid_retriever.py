@@ -8,8 +8,10 @@
 from typing import List, Optional, Dict, Any
 from loguru import logger
 import math
+import time
 
 from agentic_rag.processing.reranker import ScoredDocument
+from agentic_rag.rag.retrieval_trace import RetrievalTrace
 
 
 class BM25Retriever:
@@ -88,12 +90,15 @@ class HybridRetriever:
         vector_store=None,
         graph_store=None,
         embedder=None,
+        knowledge_repository=None,
     ):
         self.vector_store = vector_store
         self.graph_store = graph_store
         self.embedder = embedder
+        self.knowledge_repository = knowledge_repository
         self.bm25 = BM25Retriever()
         self._index_built = False
+        self.last_trace: Optional[RetrievalTrace] = None
 
     def build_index(self, documents: List[ScoredDocument], append: bool = False):
         """构建检索索引
@@ -104,6 +109,23 @@ class HybridRetriever:
         """
         self.bm25.index(documents, append=append)
         self._index_built = True
+
+    def rebuild_from_repository(self) -> int:
+        """从 SQLite 事实源重建文本和媒体派生文本的关键词索引。"""
+        if self.knowledge_repository is None:
+            return 0
+        corpus = []
+        for item in self.knowledge_repository.load_retrieval_corpus():
+            metadata = dict(item.get("metadata", {}))
+            corpus.append(ScoredDocument(
+                doc_id=item["id"], content=item.get("text", ""), score=1.0,
+                metadata={**metadata, "document_id": item.get("document_id", ""), "page": item.get("page", 1)},
+                modality=item.get("modality", "text"),
+                media_refs=metadata.get("media_refs", []),
+            ))
+        if corpus:
+            self.build_index(corpus)
+        return len(corpus)
 
     def load_persisted_index(self, path: Optional[str] = None) -> int:
         """从持久化文件重建 BM25 索引（服务重启 / 新进程时调用）
@@ -170,9 +192,11 @@ class HybridRetriever:
             融合后的文档列表
         """
         all_results = []
+        trace = RetrievalTrace(requested_mode="hybrid")
 
         # 1. 向量检索
         if use_vector and self.vector_store and self.embedder:
+            started = time.perf_counter()
             try:
                 if not query_embedding:
                     query_embedding = self.embedder.embed_query(query)
@@ -187,29 +211,55 @@ class HybridRetriever:
                         media_refs=r.payload.get("media_refs", []),
                     ))
                 logger.debug(f"向量检索: {len(vector_results)} 条结果")
+                trace.activate("vector", len(vector_results))
             except Exception as e:
                 logger.warning(f"向量检索失败: {e}")
+                trace.degrade("vector", "VECTOR_RETRIEVAL_FAILED", str(e))
+            finally:
+                trace.record_latency("vector", started)
+        elif use_vector:
+            trace.degrade("vector", "VECTOR_NOT_CONFIGURED", "向量库或嵌入模型未配置")
 
         # 2. 关键词检索
         if use_keyword and self._index_built:
+            started = time.perf_counter()
             try:
                 keyword_results = self.bm25.search(query, top_k=top_k)
                 all_results.extend(keyword_results)
                 logger.debug(f"关键词检索: {len(keyword_results)} 条结果")
+                trace.activate("keyword", len(keyword_results))
             except Exception as e:
                 logger.warning(f"关键词检索失败: {e}")
+                trace.degrade("keyword", "KEYWORD_RETRIEVAL_FAILED", str(e))
+            finally:
+                trace.record_latency("keyword", started)
+        elif use_keyword:
+            trace.degrade("keyword", "KEYWORD_INDEX_EMPTY", "关键词索引尚未构建")
 
         # 3. 图检索
         if use_graph and self.graph_store:
+            started = time.perf_counter()
             try:
                 graph_results = self._graph_retrieve(query, top_k)
                 all_results.extend(graph_results)
                 logger.debug(f"图检索: {len(graph_results)} 条结果")
+                trace.activate("graph", len(graph_results))
             except Exception as e:
                 logger.warning(f"图检索失败: {e}")
+                trace.degrade("graph", "GRAPH_RETRIEVAL_FAILED", str(e))
+            finally:
+                trace.record_latency("graph", started)
+        elif use_graph:
+            trace.degrade("graph", "GRAPH_NOT_CONFIGURED", "图存储未配置")
 
         # 4. 结果融合（RRF）
+        started = time.perf_counter()
         fused = self._reciprocal_rank_fusion(all_results, top_k)
+        trace.record_latency("fusion", started)
+        trace.finish()
+        self.last_trace = trace
+        for item in fused:
+            item.metadata = {**item.metadata, "retrieval_request_id": trace.request_id}
         logger.info(f"混合检索完成: 原始 {len(all_results)} 条, 融合后 {len(fused)} 条")
         return fused
 
@@ -367,6 +417,11 @@ class HybridRetriever:
                 rrf_scores[doc.doc_id] = rrf_scores.get(doc.doc_id, 0.0) + 1.0 / (k + rank + 1)
                 if doc.doc_id not in doc_map:
                     doc_map[doc.doc_id] = doc
+                    doc.metadata = {**doc.metadata, "channel_scores": {}}
+                saved = doc_map[doc.doc_id]
+                saved.metadata.setdefault("channel_scores", {})[source] = doc.score
+                if not getattr(saved, "media_refs", None) and getattr(doc, "media_refs", None):
+                    saved.media_refs = doc.media_refs
 
         # 按 RRF 分数排序
         ranked = sorted(

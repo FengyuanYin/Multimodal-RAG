@@ -63,6 +63,11 @@ class Settings(BaseSettings):
     media_store_path: str = "./data/media/media_registry.json"
     # 媒体 base64 数据内存上限（MB），超出部分从磁盘懒加载
     media_max_memory_mb: int = 512
+    # 文档、分块、媒体和引用的事务事实源；旧 JSON 注册表仅作兼容迁移。
+    knowledge_db_path: str = "./data/knowledge/knowledge.db"
+    request_timeout_seconds: float = 45.0
+    max_upload_mb: int = 50
+    allowed_cors_origins: str = "https://fengyuanyin.github.io,http://localhost:8000,http://127.0.0.1:8000"
 
     # ── 检索参数 ──
     top_k_initial: int = 20

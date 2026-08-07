@@ -8,7 +8,9 @@ from typing import List, Optional, Union, Dict, Any, Tuple
 from dataclasses import dataclass, field
 from pathlib import Path
 import base64
+import hashlib
 import io
+import mimetypes
 import re
 from loguru import logger
 
@@ -21,6 +23,9 @@ class MediaRef:
     label: str       # 引用的标签文本，如 "图1" / "Table 2"
     page: int = 1    # 媒体所在页码
     offset: int = 0  # 引用在文本中的起始偏移
+    confidence: float = 0.0
+    resolution: str = "unresolved"
+    reason: str = ""
 
 
 @dataclass
@@ -33,6 +38,11 @@ class MediaAsset:
     label: str = ""      # 原始标签，如 "图1"
     caption: str = ""    # 说明文字（图片描述 / 表格文本表示）
     data: Optional[str] = None  # 图片 base64 或表格原始文本（可选，便于 VLM 使用）
+    search_text: str = ""
+    mime_type: str = ""
+    checksum: str = ""
+    extraction_method: str = ""
+    quality: str = "derived"  # exact | derived | fallback
     metadata: dict = field(default_factory=dict)
 
 
@@ -82,29 +92,29 @@ def detect_media_refs(text: str, doc_id: str, page: int = 1,
     Returns:
         List[MediaRef]: 引用位置列表
     """
+    from agentic_rag.memory.media_association import detect_references, resolve_reference
+
+    assets = list((media_index or {}).values())
+    unique_assets = list({asset.id: asset for asset in assets}.values())
     refs = []
-    for pat in _MEDIA_REF_PATTERNS:
-        for m in pat.finditer(text):
-            num = m.group(1)
-            # 判断类型：模式含 "图"/"Figure"/"Fig" 为图片，含 "表"/"Table" 为表格
-            head = m.group(0)
-            media_type = "table" if ("表" in head or "Table" in head) else "image"
-            label = f"{'图' if media_type == 'image' else '表'}{num}"
-            media_id = f"{doc_id}_{media_type}_{num}"
-            # 若提供了 media_index，只保留能对应到资产、或按约定 ID 能匹配的引用
-            if media_index is not None:
-                key_candidates = [label, f"{media_type}_{num}"]
-                matched = next((media_index[k] for k in key_candidates if k in media_index), None)
-                if matched:
-                    media_id = matched.id
-                # 无匹配资产时仍保留引用（位置记录），由上层决定是否使用
-            refs.append(MediaRef(
-                media_id=media_id,
-                media_type=media_type,
-                label=label,
-                page=page,
-                offset=m.start(),
-            ))
+    for detected in detect_references(text, doc_id, page):
+        if not unique_assets:
+            media_id = f"{doc_id}_{detected.media_type}_{detected.label[1:]}"
+            confidence, resolution, reason = 0.0, "unresolved", "尚未提供媒体资产索引"
+        else:
+            decision = resolve_reference(detected, unique_assets)
+            media_id = decision.media_id
+            confidence, resolution, reason = decision.confidence, decision.resolution, decision.reason
+        refs.append(MediaRef(
+            media_id=media_id,
+            media_type=detected.media_type,
+            label=detected.label,
+            page=detected.page,
+            offset=detected.offset,
+            confidence=confidence,
+            resolution=resolution,
+            reason=reason,
+        ))
     return refs
 
 
@@ -116,6 +126,9 @@ def _ref_to_dict(ref: MediaRef) -> dict:
         "label": ref.label,
         "page": ref.page,
         "offset": ref.offset,
+        "confidence": ref.confidence,
+        "resolution": ref.resolution,
+        "reason": ref.reason,
     }
 
 
@@ -133,6 +146,11 @@ def _media_to_dict(media: MediaAsset, include_data: bool = False) -> dict:
         "page": media.page,
         "label": media.label,
         "caption": media.caption,
+        "search_text": media.search_text,
+        "mime_type": media.mime_type,
+        "checksum": media.checksum,
+        "extraction_method": media.extraction_method,
+        "quality": media.quality,
         "metadata": media.metadata,
     }
     if include_data and media.data:
@@ -189,13 +207,42 @@ class ImageParser:
 
         # 生成图片描述
         description = self._describe_image(image_bytes, metadata)
+        checksum = hashlib.sha256(image_bytes).hexdigest()
+        mime_type = metadata.get("mime_type") or mimetypes.guess_type(str(metadata.get("source", "")))[0] or "image/png"
+        media_id = f"{doc_id}_image_{checksum[:12]}"
+        asset = MediaAsset(
+            id=media_id,
+            doc_id=doc_id,
+            type="image",
+            page=int(metadata.get("page", 1) or 1),
+            label=metadata.get("label", "图1"),
+            caption=description,
+            data=base64.b64encode(image_bytes).decode("utf-8"),
+            search_text=description,
+            mime_type=mime_type,
+            checksum=checksum,
+            extraction_method="image_parser",
+            quality="derived",
+            metadata=metadata,
+        )
+        ref = MediaRef(
+            media_id=media_id,
+            media_type="image",
+            label=asset.label,
+            page=asset.page,
+            offset=0,
+            confidence=1.0,
+            resolution="exact",
+            reason="独立图片与描述块直接关联",
+        )
 
         chunk = DocumentChunk(
             chunk_id=f"{doc_id}_chunk_0000",
             doc_id=doc_id,
             content=description,
             modality="image",
-            metadata={**metadata, "image_size": len(image_bytes)},
+            metadata={**metadata, "image_size": len(image_bytes), "media_refs": refs_to_dicts([ref])},
+            media_refs=[ref],
         )
         return ParsedDocument(
             doc_id=doc_id,
@@ -203,6 +250,7 @@ class ImageParser:
             modality="image",
             chunks=[chunk],
             raw_metadata=metadata,
+            media=[asset],
         )
 
     def _describe_image(self, image_bytes: bytes, metadata: dict) -> str:
@@ -279,12 +327,34 @@ class TableParser:
             modality="table",
             metadata=metadata,
         )
+        checksum = hashlib.sha256(table_text.encode("utf-8")).hexdigest()
+        page = int(metadata.get("page", 1) or 1)
+        label = metadata.get("label", "表1")
+        asset = MediaAsset(
+            id=f"{doc_id}_table_{checksum[:12]}",
+            doc_id=doc_id,
+            type="table",
+            page=page,
+            label=label,
+            caption=table_text[:1000],
+            data=table_text,
+            search_text=table_text,
+            mime_type="text/plain",
+            checksum=checksum,
+            extraction_method="table_parser",
+            quality="derived",
+            metadata=metadata,
+        )
+        ref = MediaRef(asset.id, "table", label, page, 0, 1.0, "exact", "独立表格与文本块直接关联")
+        chunk.media_refs = [ref]
+        chunk.metadata = {**metadata, "media_refs": refs_to_dicts([ref])}
         return ParsedDocument(
             doc_id=doc_id,
             title=metadata.get("title", "未命名表格"),
             modality="table",
             chunks=[chunk],
             raw_metadata=metadata,
+            media=[asset],
         )
 
     def _parse_table(self, content: Union[str, bytes]) -> str:
@@ -367,7 +437,8 @@ class PDFParser:
 
         chunks = []
         media_index = {m.label: m for m in media if m.label}
-        img_seq = len(media)  # 已抽取页内图片数量，用于补充注册 Unstructured 图片
+        img_seq = len([m for m in media if m.type == "image"])
+        table_seq = len([m for m in media if m.type == "table"])
         for i, element in enumerate(elements):
             modality = "text"
             if "Table" in type(element).__name__:
@@ -376,15 +447,32 @@ class PDFParser:
                 modality = "image"
 
             content = str(element)
+            el_meta = getattr(element, "metadata", None)
+            page_number = int(getattr(el_meta, "page_number", 1) or 1)
             # 检测文本中对图/表的引用位置（RAG-Anything 风格）
-            refs = detect_media_refs(content, doc_id, page=1, media_index=media_index)
+            refs = detect_media_refs(content, doc_id, page=page_number, media_index=media_index)
+
+            if modality == "table":
+                table_seq += 1
+                label = f"表{table_seq}"
+                table_text = content.strip() or "[表格: 无法解析]"
+                checksum = hashlib.sha256(table_text.encode("utf-8")).hexdigest()
+                asset = MediaAsset(
+                    id=f"{doc_id}_table_{checksum[:12]}", doc_id=doc_id, type="table",
+                    page=page_number, label=label, caption=table_text[:1000], data=table_text,
+                    search_text=table_text, mime_type="text/plain", checksum=checksum,
+                    extraction_method="unstructured", quality="exact",
+                    metadata={"source": str(file_path), "element_type": type(element).__name__},
+                )
+                media.append(asset)
+                media_index[label] = asset
+                refs.append(MediaRef(asset.id, "table", label, page_number, 0, 1.0, "exact", "表格元素直接关联"))
 
             if modality == "image":
                 # 关联/注册图片资产：优先使用 Unstructured 元素自带的 base64，
                 # 否则尽力关联 PyMuPDF 已抽取的页内图片
                 img_b64 = None
                 try:
-                    el_meta = getattr(element, "metadata", None)
                     img_b64 = getattr(el_meta, "image_base64", None) if el_meta else None
                 except Exception:
                     img_b64 = None
@@ -394,26 +482,33 @@ class PDFParser:
                         id=f"{doc_id}_image_{img_seq}",
                         doc_id=doc_id,
                         type="image",
-                        page=1,
+                        page=page_number,
                         label=f"图{img_seq}",
-                        caption="",
+                        caption=content.strip(),
                         data=img_b64,
+                        search_text=content.strip(),
+                        mime_type="image/png",
+                        checksum=hashlib.sha256(base64.b64decode(img_b64)).hexdigest(),
+                        extraction_method="unstructured",
+                        quality="exact",
                         metadata={"source": str(file_path), "element_type": type(element).__name__},
                     )
                     media.append(asset)
                     media_index[asset.label] = asset
                     refs.append(MediaRef(
                         media_id=asset.id, media_type="image", label=asset.label,
-                        page=1, offset=0,
+                        page=page_number, offset=0, confidence=1.0,
+                        resolution="exact", reason="图片元素直接关联",
                     ))
                 elif not refs and media:
                     # 无 base64 时关联最后一张已抽取图片（尽力而为）
-                    page_imgs = [m for m in media if m.type == "image"]
+                    page_imgs = [m for m in media if m.type == "image" and m.page == page_number]
                     if page_imgs:
                         target = page_imgs[-1]
                         refs.append(MediaRef(
                             media_id=target.id, media_type="image", label=target.label,
-                            page=1, offset=0,
+                            page=page_number, offset=0, confidence=0.4,
+                            resolution="page_match", reason="图片元素无数据，仅按同页候选降级关联",
                         ))
                 if not content.strip():
                     content = f"[图片: {refs[0].label if refs else '未命名'}]"
@@ -426,6 +521,7 @@ class PDFParser:
                 metadata={
                     **metadata,
                     "element_type": type(element).__name__,
+                    "page": page_number,
                     "media_refs": [_ref_to_dict(r) for r in refs],
                 },
                 media_refs=refs,
@@ -493,6 +589,11 @@ class PDFParser:
                             label=f"图{img_seq}",
                             caption="",
                             data=base64.b64encode(img_bytes).decode("utf-8"),
+                            search_text="",
+                            mime_type="image/png",
+                            checksum=hashlib.sha256(img_bytes).hexdigest(),
+                            extraction_method="pymupdf",
+                            quality="exact",
                             metadata={"source": str(file_path), "xref": xref},
                         ))
                 except Exception as e:
@@ -549,6 +650,11 @@ class PDFParser:
                     label=f"第{page_no}页",
                     caption=f"第{page_no}页图像",
                     data=img_b64,
+                    search_text=f"第{page_no}页页面快照",
+                    mime_type="image/png",
+                    checksum=hashlib.sha256(base64.b64decode(img_b64)).hexdigest(),
+                    extraction_method="pymupdf_page_render",
+                    quality="fallback",
                     metadata={"source": str(file_path), "page_image": True},
                 ))
             return ParsedDocument(

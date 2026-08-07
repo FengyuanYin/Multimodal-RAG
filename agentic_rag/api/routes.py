@@ -7,6 +7,7 @@ API 路由模块
 from typing import Optional
 from fastapi import APIRouter, HTTPException, Depends, Header
 from loguru import logger
+from starlette.concurrency import run_in_threadpool
 
 from agentic_rag.api.models import (
     QueryRequest, QueryResponse, SourceItem, MediaItem,
@@ -71,7 +72,11 @@ async def query(request: QueryRequest, _=Depends(verify_api_key)):
     )
 
     # 执行查询
-    result = orch.query(orch_request)
+    result = await run_in_threadpool(orch.query, orch_request)
+    response_metadata = dict(result.metadata or {})
+    trace = getattr(getattr(orch, "hybrid_retriever", None), "last_trace", None)
+    if trace is not None:
+        response_metadata["retrieval_trace"] = trace.to_dict()
 
     # 转换为 API 响应
     return QueryResponse(
@@ -91,7 +96,7 @@ async def query(request: QueryRequest, _=Depends(verify_api_key)):
         ],
         conversation_id=result.conversation_id,
         latency_ms=result.latency_ms,
-        metadata=result.metadata,
+        metadata=response_metadata,
     )
 
 
@@ -106,7 +111,8 @@ async def ingest(request: IngestRequest, _=Depends(verify_api_key)):
 
     from agentic_rag.service import ingest_documents
 
-    result = ingest_documents(
+    result = await run_in_threadpool(
+        ingest_documents,
         orchestrator=orch,
         documents=[
             {
@@ -131,6 +137,29 @@ async def ingest(request: IngestRequest, _=Depends(verify_api_key)):
         graph_stats=result["graph_stats"],
         message=result["message"],
     )
+
+
+@router.delete("/documents/{document_id}", tags=["文档管理"])
+async def delete_document_route(document_id: str, _=Depends(verify_api_key)):
+    """删除文档及其分块、媒体和引用，并重建关键词索引。"""
+    orch = get_orchestrator()
+    if orch is None:
+        raise HTTPException(status_code=503, detail="系统正在初始化，请稍后重试")
+    from agentic_rag.service import delete_document
+    result = await run_in_threadpool(delete_document, orch, document_id)
+    if result["status"] == "not_found":
+        raise HTTPException(status_code=404, detail="文档不存在")
+    return result
+
+
+@router.post("/indexes/rebuild", tags=["文档管理"])
+async def rebuild_indexes_route(_=Depends(verify_api_key)):
+    """从事务事实源重建可派生索引。"""
+    orch = get_orchestrator()
+    if orch is None:
+        raise HTTPException(status_code=503, detail="系统正在初始化，请稍后重试")
+    from agentic_rag.service import rebuild_indexes
+    return await run_in_threadpool(rebuild_indexes, orch)
 
 
 # ── 反馈 ──

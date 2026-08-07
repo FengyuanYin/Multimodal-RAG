@@ -42,6 +42,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     if orch:
         if orch.graph_rag and hasattr(orch.graph_rag.graph_store, 'close'):
             orch.graph_rag.graph_store.close()
+        if getattr(orch, "knowledge_repository", None):
+            orch.knowledge_repository.close()
         orch.clear_history()
     logger.info("系统已关闭")
 
@@ -61,13 +63,13 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    # CORS 配置（注意：allow_origins=["*"] 时不允许携带凭证，避免浏览器拒绝）
+    allowed_origins = [item.strip() for item in settings.allowed_cors_origins.split(",") if item.strip()]
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=allowed_origins,
         allow_credentials=False,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+        allow_headers=["Content-Type", "X-API-Key", "Authorization"],
     )
 
     # 注册路由

@@ -115,6 +115,8 @@ class StandardRAGEngine:
                     score=d.score,
                     metadata=d.metadata,
                     modality=d.modality,
+                    source=getattr(d, "source", "vector"),
+                    media_refs=getattr(d, "media_refs", []) or d.metadata.get("media_refs", []),
                 )
                 for d in retrieved_docs
             ]
@@ -160,13 +162,21 @@ class StandardRAGEngine:
                 "media": m,
             })
 
+        trace = getattr(self.retriever, "last_trace", None)
+        ranking_scores = [float(d.score) for d in retrieved_docs[:self.top_k_rerank]]
         return RAGResult(
             answer=answer,
             sources=sources,
             route="standard",
-            confidence=min(1.0, sum(d.score for d in retrieved_docs[:3]) / 3) if retrieved_docs else 0.0,
+            # RRF / reranker 分数不是概率，未校准前不得作为回答置信度展示。
+            confidence=0.0,
             latency_ms=elapsed,
-            metadata={"media_count": len(media_items)} if media_items else {},
+            metadata={
+                "media_count": len(media_items),
+                "confidence_status": "uncalibrated",
+                "ranking_scores": ranking_scores,
+                "retrieval_trace": trace.to_dict() if trace else None,
+            },
         )
 
     def _build_media_context(self, media_items: list) -> str:

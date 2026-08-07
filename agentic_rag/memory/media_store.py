@@ -13,6 +13,8 @@ RAG-Anything 风格的多媒体存储：
 """
 
 import os
+import tempfile
+from threading import RLock
 from typing import Dict, List, Optional
 from loguru import logger
 
@@ -28,6 +30,7 @@ class MediaRegistry:
         self.persist_path = persist_path
         self.auto_save = auto_save
         self.max_memory_bytes = max_memory_bytes
+        self._lock = RLock()
         if persist_path and auto_save:
             self.load()
 
@@ -131,6 +134,11 @@ class MediaRegistry:
             "page": m.page,
             "label": m.label,
             "caption": m.caption,
+            "search_text": m.search_text,
+            "mime_type": m.mime_type,
+            "checksum": m.checksum,
+            "extraction_method": m.extraction_method,
+            "quality": m.quality,
             "data": m.data if include_data else None,
             "metadata": m.metadata,
         } for m in self._assets.values()]
@@ -164,11 +172,21 @@ class MediaRegistry:
                 "page": m.page,
                 "label": m.label,
                 "caption": m.caption,
+                "search_text": m.search_text,
+                "mime_type": m.mime_type,
+                "checksum": m.checksum,
+                "extraction_method": m.extraction_method,
+                "quality": m.quality,
                 "data": data,
                 "metadata": m.metadata,
             })
-        with open(path, "w", encoding="utf-8") as f:
+        directory = os.path.dirname(os.path.abspath(path))
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=directory, delete=False, suffix=".tmp") as f:
             json.dump(out, f, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+            temp_path = f.name
+        os.replace(temp_path, path)
         logger.info(f"媒体资产已保存: {self.count} 条 -> {path}")
         return path
 
@@ -190,6 +208,11 @@ class MediaRegistry:
                     label=it.get("label", ""),
                     caption=it.get("caption", ""),
                     data=it.get("data"),
+                    search_text=it.get("search_text", it.get("caption", "")),
+                    mime_type=it.get("mime_type", ""),
+                    checksum=it.get("checksum", ""),
+                    extraction_method=it.get("extraction_method", "legacy_json"),
+                    quality=it.get("quality", "derived"),
                     metadata=it.get("metadata", {}),
                 )
                 count += 1
