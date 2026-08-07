@@ -171,6 +171,39 @@
               <button id="clearData" class="btn ghost">清除本地数据</button>
             </div>
           </div>
+
+          <div class="card glass">
+            <h3>🧠 记忆设置</h3>
+            <p class="hint">对话记忆与长期记忆均只保存在本浏览器，可随时清除。</p>
+
+            <div class="field">
+              <label class="check-label">
+                <input type="checkbox" id="enableMemory" checked /> 启用对话记忆
+              </label>
+              <p class="hint">开启后，提问会带上最近若干轮对话上下文（第 1 层短期记忆）。</p>
+            </div>
+
+            <div class="field">
+              <label for="memoryRounds">上下文轮数（短期记忆）</label>
+              <input type="number" id="memoryRounds" min="1" max="30" value="10" />
+              <p class="hint">每轮 = 一问一答。值越大模型越能"记得前文"，但 token 消耗越高。</p>
+            </div>
+
+            <div class="field">
+              <label>长期记忆条目（第 3 层）</label>
+              <p class="stat-line" id="memStat">0 条</p>
+              <p class="hint">系统会从对话中自动提取用户偏好/关键事实，长期保存并用于后续回答。</p>
+            </div>
+
+            <div class="field">
+              <label>检索式记忆（第 4 层）</label>
+              <p class="stat-line">自动开启 · 从历史对话与长期记忆中检索相关内容</p>
+            </div>
+
+            <div class="card-actions">
+              <button id="clearMemories" class="btn ghost">清除长期记忆</button>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -228,7 +261,7 @@
         <div class="view-head chat-head">
           <div class="head-text">
             <h2>💬 对话</h2>
-            <p>选择检索范围，基于文档提问</p>
+            <p>选择检索范围，基于文档提问 · 支持多会话与长期记忆</p>
           </div>
           <div class="chat-filters">
             <div class="field inline">
@@ -241,20 +274,37 @@
           </div>
         </div>
         <div class="view-body chat-body">
-          <div id="messages" class="messages">
-            <div class="msg system">👋 上传 PDF 并建立索引后，即可基于文档提问。无需检索的问题（如问候）会直接回答。</div>
-          </div>
-          <form id="chatForm" class="chat-form">
-            <div class="input-wrap">
-              <textarea id="question" rows="2" placeholder="输入你的问题…（Enter 发送，Shift+Enter 换行）"></textarea>
-              <button type="submit" class="btn primary send-btn" id="askBtn" aria-label="发送">
-                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <line x1="22" y1="2" x2="11" y2="13"/>
-                  <polygon points="22 2 15 22 11 13 2 9 22 2"/>
-                </svg>
-              </button>
+          <div class="chat-layout">
+            <!-- 会话管理侧栏 -->
+            <aside class="conv-side glass">
+              <button id="newConv" class="btn primary btn-sm">＋ 新建会话</button>
+              <ul id="convList" class="conv-list"></ul>
+              <div class="mem-box">
+                <div class="mem-head">
+                  <span>🧠 长期记忆</span>
+                  <span class="mem-count" id="memCount">0</span>
+                </div>
+                <ul id="memList" class="mem-list"></ul>
+              </div>
+            </aside>
+            <!-- 对话主区 -->
+            <div class="chat-main">
+              <div id="messages" class="messages">
+                <div class="msg system">👋 上传 PDF 并建立索引后，即可基于文档提问。无需检索的问题（如问候）会直接回答。</div>
+              </div>
+              <form id="chatForm" class="chat-form">
+                <div class="input-wrap">
+                  <textarea id="question" rows="2" placeholder="输入你的问题…（Enter 发送，Shift+Enter 换行）"></textarea>
+                  <button type="submit" class="btn primary send-btn" id="askBtn" aria-label="发送">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <line x1="22" y1="2" x2="11" y2="13"/>
+                      <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+                    </svg>
+                  </button>
+                </div>
+              </form>
             </div>
-          </form>
+          </div>
         </div>
       </section>
     </main>
@@ -264,6 +314,6 @@
     开源示例 · API Key 仅发送到你配置的 API 地址 · 文档与索引默认保留在浏览器本地
   </footer>
 
-  <script src="app.js?v=4"></script>
+  <script src="app.js?v=5"></script>
 </body>
 </html>

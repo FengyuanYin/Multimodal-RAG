@@ -105,6 +105,65 @@ const Store = {
     localStorage.removeItem(this.KEY);
     localStorage.removeItem(this.CATS_KEY);
     localStorage.removeItem(this.DOCS_KEY);
+    localStorage.removeItem("pdfchat.convs.v1");
+    localStorage.removeItem("pdfchat.memories.v1");
+    localStorage.removeItem("pdfchat.activeconv.v1");
+  },
+};
+
+/* ───────────────────────── 会话存储（第 2 层：跨刷新持久化） ───────────────────────── */
+const ConvStore = {
+  KEY: "pdfchat.convs.v1",
+  ACTIVE_KEY: "pdfchat.activeconv.v1",
+  load() {
+    try {
+      const v = JSON.parse(localStorage.getItem(this.KEY) || "[]");
+      return Array.isArray(v) ? v : [];
+    } catch (e) {
+      return [];
+    }
+  },
+  save(convs) {
+    try {
+      localStorage.setItem(this.KEY, JSON.stringify(convs));
+    } catch (e) {
+      console.warn("会话持久化失败（可能超出配额）", e);
+    }
+  },
+  loadActive() {
+    try {
+      return localStorage.getItem(this.ACTIVE_KEY) || "";
+    } catch (e) {
+      return "";
+    }
+  },
+  saveActive(id) {
+    try {
+      localStorage.setItem(this.ACTIVE_KEY, id || "");
+    } catch (e) { /* ignore */ }
+  },
+};
+
+/* ───────────────────────── 长期记忆存储（第 3 层） ───────────────────────── */
+const MemStore = {
+  KEY: "pdfchat.memories.v1",
+  load() {
+    try {
+      const v = JSON.parse(localStorage.getItem(this.KEY) || "[]");
+      return Array.isArray(v) ? v : [];
+    } catch (e) {
+      return [];
+    }
+  },
+  save(mems) {
+    try {
+      localStorage.setItem(this.KEY, JSON.stringify(mems));
+    } catch (e) {
+      console.warn("长期记忆持久化失败", e);
+    }
+  },
+  clear() {
+    localStorage.removeItem(this.KEY);
   },
 };
 
@@ -118,6 +177,12 @@ const State = {
   bm25: null,
   // 可选向量数据：{ vectors: Float32Array, norm: Float32Array, dim: number }
   vectors: null,
+  // 会话列表：[{ id, title, messages: [{role, content, ts}], createdAt, updatedAt }]
+  convs: [],
+  // 当前会话 ID
+  activeConvId: "",
+  // 长期记忆条目：[{ id, type, content, ts }]
+  memories: [],
 };
 
 /* ───────────────────────── 分词（中文 bigram + 英文单词） ───────────────────────── */
@@ -462,7 +527,13 @@ function isDirectAnswerable(q) {
 }
 
 /* ───────────────────────── 对话（OpenAI 兼容） ───────────────────────── */
-async function askLLM(settings, systemPrompt, userContent) {
+async function askLLM(settings, systemPrompt, userContent, history) {
+  const messages = [{ role: "system", content: systemPrompt }];
+  if (history && history.length) {
+    messages.push(...history);
+  }
+  messages.push({ role: "user", content: userContent });
+
   const resp = await fetch(apiUrl("/chat/completions", settings), {
     method: "POST",
     headers: apiHeaders(settings),
@@ -470,10 +541,7 @@ async function askLLM(settings, systemPrompt, userContent) {
       apiBody(
         {
           model: settings.model,
-          messages: [
-            { role: "system", content: systemPrompt },
-            { role: "user", content: userContent },
-          ],
+          messages: messages,
           temperature: 0.2,
         },
         settings
@@ -505,6 +573,8 @@ function loadSettingsIntoForm() {
   $("mineruMode").value = s.mineruMode || "official";
   $("mineruApiKey").value = s.mineruApiKey || "";
   $("mineruUrl").value = s.mineruUrl || "";
+  $("enableMemory").checked = s.enableMemory !== false;
+  $("memoryRounds").value = s.memoryRounds || 10;
   syncParserUI();
   syncModelTag();
   syncRetrievalStat();
@@ -524,6 +594,8 @@ function collectSettings() {
     mineruMode: $("mineruMode").value,
     mineruApiKey: $("mineruApiKey").value.trim(),
     mineruUrl: $("mineruUrl").value.trim().replace(/\/+$/, ""),
+    enableMemory: $("enableMemory").checked,
+    memoryRounds: parseInt($("memoryRounds").value, 10) || 10,
   };
 }
 
@@ -740,6 +812,272 @@ async function handleFiles(files) {
   renderAll();
 }
 
+/* ───────────────────────── 会话管理（第 2 层） ───────────────────────── */
+function currentConv() {
+  return State.convs.find((c) => c.id === State.activeConvId) || null;
+}
+
+function saveConversation(conv) {
+  if (!conv) return;
+  conv.updatedAt = Date.now();
+  ConvStore.save(State.convs);
+}
+
+function newConversation() {
+  const conv = {
+    id: uid("conv"),
+    title: "新对话",
+    messages: [],
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+  State.convs.unshift(conv);
+  State.activeConvId = conv.id;
+  ConvStore.save(State.convs);
+  ConvStore.saveActive(conv.id);
+  renderConvList();
+  renderMessagesFromConv(conv);
+  return conv;
+}
+
+function switchConversation(id) {
+  const conv = State.convs.find((c) => c.id === id);
+  if (!conv) return;
+  State.activeConvId = id;
+  ConvStore.saveActive(id);
+  renderConvList();
+  renderMessagesFromConv(conv);
+}
+
+function deleteConversation(id) {
+  State.convs = State.convs.filter((c) => c.id !== id);
+  if (State.activeConvId === id) {
+    State.activeConvId = "";
+    if (State.convs.length) {
+      State.activeConvId = State.convs[0].id;
+      ConvStore.saveActive(State.activeConvId);
+      renderMessagesFromConv(State.convs[0]);
+    } else {
+      ConvStore.saveActive("");
+      $("messages").innerHTML = "";
+      addMessage("system", "已删除会话。点击「新建会话」开始新的对话。");
+    }
+  }
+  ConvStore.save(State.convs);
+  renderConvList();
+}
+
+function renderConvList() {
+  const list = $("convList");
+  list.innerHTML = "";
+  if (!State.convs.length) {
+    const empty = el("li", "conv-empty", "暂无会话");
+    list.appendChild(empty);
+    return;
+  }
+  for (const conv of State.convs) {
+    const li = el("li", "conv-item" + (conv.id === State.activeConvId ? " active" : ""));
+    const label = el("div", "conv-label");
+    const title = el("div", "conv-title", conv.title || "新对话");
+    const sub = el("div", "conv-sub", new Date(conv.updatedAt).toLocaleString());
+    label.appendChild(title);
+    label.appendChild(sub);
+    li.appendChild(label);
+    const del = el("button", "conv-del", "🗑");
+    del.title = "删除会话";
+    del.addEventListener("click", (e) => {
+      e.stopPropagation();
+      deleteConversation(conv.id);
+    });
+    li.appendChild(del);
+    li.addEventListener("click", () => switchConversation(conv.id));
+    list.appendChild(li);
+  }
+}
+
+function renderMessagesFromConv(conv) {
+  const box = $("messages");
+  box.innerHTML = "";
+  if (!conv || !conv.messages.length) {
+    addMessage("system", "👋 上传 PDF 并建立索引后，即可基于文档提问。无需检索的问题（如问候）会直接回答。");
+    return;
+  }
+  for (const m of conv.messages) {
+    const msg = el("div", `msg ${m.role}`);
+    msg.textContent = m.content;
+    if (m.meta) {
+      const meta = el("div", "meta");
+      if (typeof m.meta === "string") meta.textContent = m.meta;
+      else meta.append(...m.meta);
+      msg.appendChild(meta);
+    }
+    box.appendChild(msg);
+  }
+  box.scrollTop = box.scrollHeight;
+}
+
+function pushConvMessage(role, content, meta) {
+  let conv = currentConv();
+  if (!conv) {
+    conv = newConversation();
+  }
+  conv.messages.push({ role, content, meta: meta || null, ts: Date.now() });
+  // 控制单会话消息上限（避免 localStorage 过大）：最多保留 60 条
+  if (conv.messages.length > 60) {
+    conv.messages = conv.messages.slice(-60);
+  }
+  // 自动更新标题：用第一条用户消息
+  const firstUser = conv.messages.find((m) => m.role === "user");
+  if (firstUser && conv.title === "新对话") {
+    conv.title = firstUser.content.slice(0, 24) || "新对话";
+  }
+  saveConversation(conv);
+  renderConvList();
+}
+
+/* ───────────────────────── 第 1 层：短期记忆（最近 N 轮） ───────────────────────── */
+function getHistoryForPrompt(settings) {
+  if (!settings.enableMemory) return [];
+  const conv = currentConv();
+  if (!conv) return [];
+  const rounds = settings.memoryRounds || 10;
+  // 取最近 rounds 轮（一问一答 = 2 条），但排除最后一条 assistant（通常未完成）
+  const msgs = conv.messages.slice(-(rounds * 2));
+  const history = [];
+  for (const m of msgs) {
+    if (m.role === "user" || m.role === "assistant") {
+      history.push({ role: m.role, content: m.content });
+    }
+  }
+  return history;
+}
+
+/* ───────────────────────── 第 4 层：检索式记忆 ───────────────────────── */
+function memorySearch(query, settings) {
+  if (!settings.enableMemory) return [];
+  const qTokens = tokenize(query);
+  const qSet = new Set(qTokens);
+  const cands = [];
+
+  // 候选 1：当前会话历史（去掉最近一条 user，避免重复）
+  const conv = currentConv();
+  if (conv && conv.messages.length) {
+    const historyMsgs = conv.messages.slice(0, -1);
+    for (const m of historyMsgs) {
+      if (m.role === "user" || m.role === "assistant") {
+        cands.push({ text: `${m.role === "user" ? "用户" : "助手"}: ${m.content}`, kind: "history" });
+      }
+    }
+  }
+
+  // 候选 2：长期记忆
+  for (const mem of State.memories) {
+    cands.push({ text: `[记忆] ${mem.content}`, kind: "memory" });
+  }
+
+  // 关键词重叠打分
+  const scored = cands
+    .map((c) => {
+      const cTokens = tokenize(c.text);
+      const cSet = new Set(cTokens);
+      let hit = 0;
+      for (const t of qSet) if (cSet.has(t)) hit++;
+      return { c, score: hit / Math.max(1, qSet.size) };
+    })
+    .filter((r) => r.score >= 0.25 && r.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 3);
+
+  return scored.map((r) => r.c.text);
+}
+
+/* ───────────────────────── 第 3 层：长期记忆提取 ───────────────────────── */
+async function extractMemories(question, answer, settings) {
+  if (!settings.enableMemory || !settings.apiKey) return;
+  try {
+    const system =
+      "你是记忆提取助手。从用户问题与助手回答中，提取值得长期记住的信息，例如：\n" +
+      "- 用户偏好（语言、风格、内容偏好）\n" +
+      "- 关键事实（用户身份、项目背景、重要结论）\n" +
+      "- 上下文（用户正在做的事、目标）\n" +
+      "请以 JSON 数组输出，每项形如 {\"type\": \"preference|fact|context\", \"content\": \"一句话描述\"}。\n" +
+      "如果没有值得记住的内容，输出 []。不要输出其他内容。";
+    const resp = await fetch(apiUrl("/chat/completions", settings), {
+      method: "POST",
+      headers: apiHeaders(settings),
+      body: JSON.stringify(
+        apiBody(
+          {
+            model: settings.model,
+            messages: [
+              { role: "system", content: system },
+              { role: "user", content: `用户问题：${question}\n\n助手回答：${answer}` },
+            ],
+            temperature: 0.1,
+            max_tokens: 300,
+          },
+          settings
+        )
+      ),
+    });
+    if (!resp.ok) return;
+    const data = await resp.json();
+    const text = (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || "";
+    let items = [];
+    try {
+      items = JSON.parse(text);
+    } catch (e) {
+      const m = text.match(/\[[\s\S]*\]/);
+      if (m) items = JSON.parse(m[0]);
+    }
+    if (!Array.isArray(items)) return;
+
+    let added = 0;
+    for (const it of items) {
+      const content = String(it.content || "").trim();
+      if (!content) continue;
+      // 去重：内容完全相同或高度相似则跳过
+      const dup = State.memories.some((m) => m.content === content);
+      if (dup) continue;
+      State.memories.push({
+        id: uid("mem"),
+        type: it.type || "fact",
+        content,
+        ts: Date.now(),
+      });
+      added++;
+    }
+    // 上限 50 条
+    if (State.memories.length > 50) {
+      State.memories = State.memories.slice(-50);
+    }
+    if (added > 0) {
+      MemStore.save(State.memories);
+      renderMemories();
+    }
+  } catch (e) {
+    // 记忆提取失败不影响主流程
+    console.warn("记忆提取失败（已忽略）:", e);
+  }
+}
+
+function renderMemories() {
+  const list = $("memList");
+  list.innerHTML = "";
+  $("memCount").textContent = String(State.memories.length);
+  $("memStat").textContent = `${State.memories.length} 条`;
+  if (!State.memories.length) {
+    const empty = el("li", "mem-empty", "暂无长期记忆");
+    list.appendChild(empty);
+    return;
+  }
+  for (const mem of State.memories.slice(-8).reverse()) {
+    const li = el("li", "mem-item");
+    li.textContent = mem.content;
+    list.appendChild(li);
+  }
+}
+
 /* ───────────────────────── 建立索引 ───────────────────────── */
 async function handleBuildIndex() {
   if (!State.docs.length) {
@@ -796,19 +1134,39 @@ async function handleAsk(question) {
     return;
   }
 
+  // 确保存在当前会话（第 2 层）
+  let conv = currentConv();
+  if (!conv) conv = newConversation();
+
   addMessage("user", question);
+  pushConvMessage("user", question);
   const thinking = addMessage("assistant", "思考中…");
   $("askBtn").disabled = true;
 
   try {
+    // 第 1 层：短期记忆（最近 N 轮）
+    const history = getHistoryForPrompt(settings);
+
+    // 第 3 层：长期记忆注入 system
+    let memoryBlock = "";
+    if (settings.enableMemory && State.memories.length) {
+      const lines = State.memories.map((m, i) => `${i + 1}. ${m.content}`).join("\n");
+      memoryBlock = `\n\n【关于用户的长期记忆】\n${lines}\n（仅作参考，若与文档信息冲突以文档为准）`;
+    }
+
     // 1. 无需检索的问题：直接回答，并明确告知未使用检索
     if (isDirectAnswerable(question)) {
-      const system = "你是一个友好、简洁的 AI 助手。用户问的是问候或自我介绍类问题，不需要检索文档，请直接、简短地回答（1-3 句话）。";
-      const answer = await askLLM(settings, system, question);
+      const system =
+        "你是一个友好、简洁的 AI 助手。用户问的是问候或自我介绍类问题，不需要检索文档，请直接、简短地回答（1-3 句话）。" +
+        memoryBlock;
+      const answer = await askLLM(settings, system, question, history);
       thinking.textContent = answer;
       thinking.className = "msg assistant";
       const chip = el("span", "chip no-retrieval", "⚡ 未使用检索 · 直接回答");
       thinking.appendChild(el("div", "meta")).appendChild(chip);
+      pushConvMessage("assistant", answer, [chip.textContent]);
+      renderMemories();
+      extractMemories(question, answer, settings); // 第 3 层：后台提取记忆
       return;
     }
 
@@ -846,6 +1204,7 @@ async function handleAsk(question) {
     if (!topChunks.length) {
       thinking.textContent = `在「${scopeName}」中未检索到相关内容，请尝试换一种问法或扩大检索范围。`;
       thinking.className = "msg assistant";
+      pushConvMessage("assistant", thinking.textContent);
       return;
     }
 
@@ -853,22 +1212,35 @@ async function handleAsk(question) {
     const context = topChunks
       .map((c, i) => `[${i + 1}]（来源：${c.file} 第${c.page}页）\n${c.text}`)
       .join("\n\n---\n\n");
+
+    // 第 4 层：检索式记忆（从历史与长期记忆中检索相关片段）
+    const memHits = memorySearch(question, settings);
+    let memContext = "";
+    if (memHits.length) {
+      memContext = "\n\n【相关历史对话】\n" + memHits.map((t) => "- " + t).join("\n");
+    }
+
     const systemPrompt =
       "你是一个严谨的文档问答助手。请仅依据提供的参考片段回答用户问题。\n" +
       "要求：\n" +
       "1. 只使用参考片段中的信息，不要编造\n" +
       "2. 若参考片段信息不足，明确说明“根据现有文档无法回答”\n" +
       "3. 在回答末尾用 [1][2] 形式标注引用的片段编号\n" +
-      "4. 使用与用户问题相同的语言回答";
+      "4. 使用与用户问题相同的语言回答" +
+      memoryBlock;
 
-    const answer = await askLLM(settings, systemPrompt, `参考片段：\n${context}\n\n用户问题：${question}`);
+    const userContent =
+      `参考片段：\n${context}${memContext}\n\n用户问题：${question}`;
+
+    const answer = await askLLM(settings, systemPrompt, userContent, history);
 
     thinking.textContent = answer;
     thinking.className = "msg assistant";
 
-    // 5. 元信息：检索范围
+    // 5. 元信息：检索范围 + 记忆标签
     const meta = el("div", "meta");
     meta.appendChild(el("span", "chip", `🔍 检索范围：${scopeName}`));
+    if (memHits.length) meta.appendChild(el("span", "chip", `🧠 相关历史：${memHits.length} 条`));
     thinking.appendChild(meta);
 
     // 6. 引用片段
@@ -879,6 +1251,11 @@ async function handleAsk(question) {
       src.appendChild(el("div", "", `[${i + 1}] ${c.file} 第${c.page}页：${c.text.slice(0, 120)}…`));
     });
     thinking.appendChild(src);
+
+    // 保存回答到会话（第 2 层）
+    pushConvMessage("assistant", answer, [meta.textContent || "assistant"]);
+    renderMemories();
+    extractMemories(question, answer, settings); // 第 3 层：后台提取记忆
   } catch (e) {
     thinking.textContent = `请求失败：${e.message}`;
     thinking.className = "msg error";
@@ -909,13 +1286,32 @@ function bindEvents() {
     State.bm25 = null;
     State.vectors = null;
     State.cats = [];
+    State.convs = [];
+    State.activeConvId = "";
+    State.memories = [];
     loadSettingsIntoForm();
     renderAll();
+    renderConvList();
+    renderMemories();
+    $("messages").innerHTML = "";
     addMessage("system", "本地数据已全部清除。");
+  });
+  $("clearMemories").addEventListener("click", () => {
+    State.memories = [];
+    MemStore.clear();
+    renderMemories();
+    addMessage("system", "长期记忆已清除。");
   });
   $("toggleKey").addEventListener("click", () => {
     const input = $("apiKey");
     input.type = input.type === "password" ? "text" : "password";
+  });
+
+  // 会话
+  $("newConv").addEventListener("click", () => {
+    newConversation();
+    $("messages").innerHTML = "";
+    addMessage("system", "已创建新会话。");
   });
 
   // 分类
@@ -979,10 +1375,21 @@ function init() {
   try {
     State.cats = Store.loadCats();
     State.docs = Store.loadDocs();
+    State.convs = ConvStore.load();
+    State.memories = MemStore.load();
+    const savedActive = ConvStore.loadActive();
+    State.activeConvId = savedActive && State.convs.some((c) => c.id === savedActive)
+      ? savedActive
+      : (State.convs[0] ? State.convs[0].id : "");
     loadSettingsIntoForm();
     renderAll();
+    renderConvList();
+    renderMemories();
     bindEvents();
-    if (State.docs.length) {
+    const conv = currentConv();
+    if (conv) {
+      renderMessagesFromConv(conv);
+    } else if (State.docs.length) {
       addMessage("system", `已从本地恢复 ${State.docs.length} 个文档，请建立索引后提问。`);
     }
   } catch (e) {
