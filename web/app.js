@@ -417,6 +417,7 @@ function loadSettingsIntoForm() {
   $("baseUrl").value = s.baseUrl || "https://api.openai.com/v1";
   $("model").value = s.model || "gpt-4o-mini";
   $("embedModel").value = s.embedModel || "";
+  $("retrievalMode").value = s.retrievalMode || "keyword";
   $("topK").value = s.topK || 5;
   $("chunkSize").value = s.chunkSize || 800;
   $("parser").value = s.parser || "local";
@@ -433,6 +434,7 @@ function collectSettings() {
     baseUrl: $("baseUrl").value.trim().replace(/\/+$/, ""),
     model: $("model").value.trim(),
     embedModel: $("embedModel").value.trim(),
+    retrievalMode: $("retrievalMode").value,
     topK: parseInt($("topK").value, 10) || 5,
     chunkSize: parseInt($("chunkSize").value, 10) || 800,
     parser: $("parser").value,
@@ -457,20 +459,35 @@ function syncModelTag() {
 
 function syncRetrievalStat() {
   const s = Settings.load();
-  const parts = [s.parser === "mineru" ? "MinerU 解析" : "本地解析"];
-  parts.push(s.embedModel ? "BM25 + 向量检索" : "BM25 关键词检索");
+  const modeMap = { keyword: "关键词检索", vector: "向量检索", hybrid: "混合检索（关键词 + 向量）" };
+  const mode = modeMap[s.retrievalMode] || "关键词检索";
+  const parts = [s.parser === "mineru" ? "MinerU 解析" : "本地解析", mode];
+  if ((s.retrievalMode === "vector" || s.retrievalMode === "hybrid") && !s.embedModel) {
+    parts.push("⚠️ 未配置 Embedding 模型，将自动降级为关键词检索");
+  }
   $("retrievalStat").textContent = parts.join(" · ");
 }
 
 /* ───────────────────────── 视图切换（侧边栏） ───────────────────────── */
 function switchView(name) {
+  const target = document.getElementById(`view-${name}`);
+  if (!target) {
+    console.warn(`视图不存在: view-${name}`);
+    return;
+  }
   document.querySelectorAll(".nav-item").forEach((b) => {
     b.classList.toggle("active", b.dataset.view === name);
   });
   document.querySelectorAll(".view").forEach((v) => {
-    v.classList.toggle("active", v.id === `view-${name}`);
+    v.classList.toggle("active", v === target);
   });
 }
+
+// 导航事件委托放在顶层，即使后续初始化失败也能保证切换可用
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest(".nav-item");
+  if (btn && btn.dataset.view) switchView(btn.dataset.view);
+});
 
 /* ───────────────────────── 分类渲染 ───────────────────────── */
 function currentCats() {
@@ -541,8 +558,8 @@ function renderDocList() {
   list.innerHTML = "";
   for (const doc of State.docs) {
     const li = el("li");
-    li.appendChild(el("span", "", doc.name));
-    li.appendChild(el("span", "pages", fmtPages(doc.pages.length)));
+    li.appendChild(el("span", "", doc.name || "未命名文档"));
+    li.appendChild(el("span", "pages", fmtPages(doc.pages ? doc.pages.length : 0)));
 
     const sel = el("select", "cat-select");
     sel.appendChild(new Option("未分类", ""));
@@ -569,7 +586,7 @@ function renderDocList() {
     li.appendChild(del);
     list.appendChild(li);
   }
-  $("docStats").textContent = `共 ${State.docs.length} 个文档 / ${State.docs.reduce((s, d) => s + d.pages.length, 0)} 页`;
+  $("docStats").textContent = `共 ${State.docs.length} 个文档 / ${State.docs.reduce((s, d) => s + (d.pages ? d.pages.length : 0), 0)} 页`;
   $("docBadge").textContent = String(State.docs.length);
   $("buildIndex").disabled = State.docs.length === 0;
 }
@@ -646,9 +663,14 @@ async function handleBuildIndex() {
     State.vectors = null;
     setProgress(50);
 
-    if (settings.embedModel && settings.apiKey) {
-      addMessage("system", `正在生成向量索引（${State.chunks.length} 块）…`);
-      State.vectors = await buildVectors(State.chunks, settings);
+    const wantVector = settings.retrievalMode === "vector" || settings.retrievalMode === "hybrid";
+    if (wantVector) {
+      if (!settings.embedModel || !settings.apiKey) {
+        addMessage("system", "检索模式为向量/混合，但未配置 Embedding 模型或 API Key，本次使用关键词检索。");
+      } else {
+        addMessage("system", `正在生成向量索引（${State.chunks.length} 块）…`);
+        State.vectors = await buildVectors(State.chunks, settings);
+      }
     }
     setProgress(100);
     addMessage(
@@ -706,8 +728,9 @@ async function handleAsk(question) {
     const qTokens = tokenize(question);
     const bm25Hits = State.bm25 ? State.bm25.search(qTokens, settings.topK * 2, filter) : [];
 
+    const wantVector = settings.retrievalMode === "vector" || settings.retrievalMode === "hybrid";
     let vectorHits = [];
-    if (State.vectors && settings.embedModel) {
+    if (wantVector && State.vectors && settings.embedModel) {
       const [qvec] = await embedTexts([question], settings);
       vectorHits = vectorSearch(qvec, State, settings.topK * 2, filter);
     }
@@ -768,13 +791,12 @@ async function handleAsk(question) {
 
 /* ───────────────────────── 事件绑定 ───────────────────────── */
 function bindEvents() {
-  // 侧边栏导航
-  document.querySelectorAll(".nav-item").forEach((btn) => {
-    btn.addEventListener("click", () => switchView(btn.dataset.view));
-  });
-
   // 设置
   $("parser").addEventListener("change", syncParserUI);
+  $("retrievalMode").addEventListener("change", () => {
+    syncRetrievalStat();
+    addMessage("system", "检索模式已切换，请重新建立索引后生效。");
+  });
   $("saveSettings").addEventListener("click", () => {
     Settings.save(collectSettings());
     syncModelTag();
@@ -855,13 +877,19 @@ function bindEvents() {
 
 /* ───────────────────────── 初始化 ───────────────────────── */
 function init() {
-  State.cats = Store.loadCats();
-  State.docs = Store.loadDocs();
-  loadSettingsIntoForm();
-  renderAll();
-  bindEvents();
-  if (State.docs.length) {
-    addMessage("system", `已从本地恢复 ${State.docs.length} 个文档，请建立索引后提问。`);
+  try {
+    State.cats = Store.loadCats();
+    State.docs = Store.loadDocs();
+    loadSettingsIntoForm();
+    renderAll();
+    bindEvents();
+    if (State.docs.length) {
+      addMessage("system", `已从本地恢复 ${State.docs.length} 个文档，请建立索引后提问。`);
+    }
+  } catch (e) {
+    console.error("初始化失败（已降级继续运行）:", e);
+    // 尽力保证导航可用（事件委托已在顶层注册），并重新绑定基础事件
+    try { bindEvents(); } catch (_) {}
   }
 }
 

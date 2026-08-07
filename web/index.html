@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>PDF Chat · BYOK 私有 RAG</title>
   <meta name="description" content="浏览器本地 PDF 问答工具：上传 PDF，自带 API Key，数据不出浏览器。" />
-  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="style.css?v=2" />
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
   <script>
     // pdf.js 使用限制（必须设置 workerSrc 才能解析 PDF）
@@ -105,6 +105,15 @@
             <div class="field">
               <label for="embedModel">Embedding 模型（可选，用于向量增强）</label>
               <input type="text" id="embedModel" placeholder="留空则仅用关键词检索" />
+            </div>
+
+            <div class="field">
+              <label for="retrievalMode">检索模式</label>
+              <select id="retrievalMode">
+                <option value="keyword">关键词检索（默认）</option>
+                <option value="vector">向量检索（需 Embedding 模型）</option>
+                <option value="hybrid">混合检索（关键词 + 向量）</option>
+              </select>
             </div>
 
             <div class="row2">
@@ -240,6 +249,6 @@
     开源示例 · API Key 仅发送到你配置的 API 地址 · 文档与索引默认保留在浏览器本地
   </footer>
 
-  <script src="app.js"></script>
+  <script src="app.js?v=2"></script>
 </body>
 </html>
