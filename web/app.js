@@ -1009,6 +1009,265 @@ function pushConvMessage(role, content, meta) {
   renderConvList();
 }
 
+/* ───────────────────────── RAGAS 评估（第 5 大功能） ───────────────────────── */
+const EvalStore = {
+  KEY: "pdfchat.evalset.v1",
+  load() {
+    try {
+      const v = JSON.parse(localStorage.getItem(this.KEY) || "{}");
+      return (v && typeof v === "object") ? v : {};
+    } catch (e) {
+      return {};
+    }
+  },
+  save(q, gt) {
+    try {
+      localStorage.setItem(this.KEY, JSON.stringify({ questions: q, groundTruth: gt }));
+    } catch (e) {
+      console.warn("测试集保存失败", e);
+    }
+  },
+};
+
+const EVAL_METRICS = [
+  { key: "faithfulness", name: "忠实度", needTruth: false,
+    desc: "答案是否忠于检索上下文" },
+  { key: "answer_relevancy", name: "答案相关性", needTruth: false,
+    desc: "答案是否充分回答问题" },
+  { key: "context_precision", name: "上下文精确率", needTruth: false,
+    desc: "检索片段中相关信息占比" },
+  { key: "context_recall", name: "上下文召回率", needTruth: true,
+    desc: "检索是否覆盖参考答案要点" },
+  { key: "answer_correctness", name: "答案正确性", needTruth: true,
+    desc: "答案与参考答案的一致程度" },
+];
+
+function buildMetricPrompt(metric, sample) {
+  const contexts = (sample.contexts && sample.contexts.length)
+    ? sample.contexts.map((c, i) => `[${i + 1}] ${c}`).join("\n")
+    : "（无）";
+  const base = "你是 RAG 系统评估器。请根据要求给出 0 到 1 之间的分数（0=差，1=优）。\n只输出 JSON：{\"score\": 数字}，不要输出其他内容。\n\n";
+  switch (metric) {
+    case "faithfulness":
+      return base + `判断答案是否忠实于给定上下文：答案中的每个事实都应能从上下文中找到依据，不包含上下文之外的信息。\n\n上下文：\n${contexts}\n\n答案：\n${sample.answer}`;
+    case "answer_relevancy":
+      return base + `评估答案与问题的相关性：答案是否直接、充分、完整地回答了问题？\n\n问题：\n${sample.question}\n\n答案：\n${sample.answer}`;
+    case "context_precision":
+      return base + `给定问题与检索到的上下文片段，评估片段中真正与问题相关的信息所占比例（精确率）。\n\n问题：\n${sample.question}\n\n上下文：\n${contexts}`;
+    case "context_recall":
+      return base + `给定问题、参考答案与检索上下文，评估上下文中是否包含回答该问题所需的全部关键信息（召回率）。\n\n问题：\n${sample.question}\n\n参考答案：\n${sample.ground_truth}\n\n上下文：\n${contexts}`;
+    case "answer_correctness":
+      return base + `将模型答案与参考答案对比，评估答案的正确性与完整性（事实一致性、关键点覆盖）。\n\n问题：\n${sample.question}\n\n模型答案：\n${sample.answer}\n\n参考答案：\n${sample.ground_truth}`;
+    default:
+      return base + "请给出分数。";
+  }
+}
+
+async function judgeMetric(settings, metric, sample) {
+  const prompt = buildMetricPrompt(metric, sample);
+  try {
+    const resp = await fetch(apiUrl("/chat/completions", settings), {
+      method: "POST",
+      headers: apiHeaders(settings),
+      body: JSON.stringify(
+        apiBody(
+          {
+            model: settings.model,
+            messages: [
+              { role: "system", content: "你是一个严谨、客观的 RAG 评估打分器。" },
+              { role: "user", content: prompt },
+            ],
+            temperature: 0.0,
+            max_tokens: 60,
+          },
+          settings
+        )
+      ),
+    });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    const text = (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || "";
+    let score = null;
+    try {
+      const parsed = JSON.parse(text);
+      score = parseFloat(parsed.score);
+    } catch (e) {
+      const m = text.match(/\d+(\.\d+)?/);
+      if (m) score = parseFloat(m[0]);
+    }
+    if (score === null || isNaN(score)) return null;
+    return Math.max(0, Math.min(1, score));
+  } catch (e) {
+    console.warn(`指标 ${metric} 评判失败（已忽略）:`, e);
+    return null;
+  }
+}
+
+/* 评估用检索：复用 BM25 + 可选向量 */
+async function evalRetrieve(question, settings) {
+  const filter = chatCatFilter();
+  const qTokens = tokenize(question);
+  const bm25Hits = State.bm25 ? State.bm25.search(qTokens, settings.topK * 2, filter) : [];
+  let vectorHits = [];
+  if ((settings.retrievalMode === "vector" || settings.retrievalMode === "hybrid") &&
+      State.vectors && settings.embedModel) {
+    try {
+      const [qvec] = await embedTexts([question], settings);
+      vectorHits = vectorSearch(qvec, State, settings.topK * 2, filter);
+    } catch (e) {
+      console.warn("评估向量检索失败（忽略）:", e);
+    }
+  }
+  let topChunks;
+  if (vectorHits.length) {
+    topChunks = rrfMerge(
+      [bm25Hits.map((r) => ({ chunk: r.chunk })), vectorHits.map((r) => ({ chunk: r.chunk }))],
+      settings.topK
+    );
+  } else {
+    topChunks = bm25Hits.slice(0, settings.topK).map((r) => r.chunk);
+  }
+  return topChunks;
+}
+
+function setEvalProgress(pct, status) {
+  $("evalProgress").classList.remove("hidden");
+  $("evalProgressBar").style.width = `${Math.max(2, pct)}%`;
+  if (status !== undefined) $("evalStatus").textContent = status;
+}
+
+function scoreClass(v) {
+  if (v === null || v === undefined || isNaN(v)) return "na";
+  if (v >= 0.8) return "good";
+  if (v >= 0.6) return "mid";
+  return "bad";
+}
+
+function renderEvalResults(results) {
+  // 汇总分数
+  const scoresBox = $("evalScores");
+  scoresBox.innerHTML = "";
+  for (const m of EVAL_METRICS) {
+    const vals = results
+      .map((r) => r.scores[m.key])
+      .filter((v) => v !== null && v !== undefined && !isNaN(v));
+    const avg = vals.length ? (vals.reduce((a, b) => a + b, 0) / vals.length) : null;
+    const card = el("div", "eval-score-card " + scoreClass(avg));
+    card.appendChild(el("div", "name", m.name));
+    card.appendChild(el("div", "val", avg === null ? "—" : avg.toFixed(2)));
+    card.appendChild(el("div", "sub", m.desc));
+    scoresBox.appendChild(card);
+  }
+
+  // 明细表
+  const detail = $("evalDetail");
+  detail.innerHTML = "";
+  const table = el("table");
+  const thead = el("thead");
+  const headTr = el("tr");
+  headTr.appendChild(el("th", "", "问题"));
+  headTr.appendChild(el("th", "", "模型答案"));
+  for (const m of EVAL_METRICS) headTr.appendChild(el("th", "", m.name));
+  thead.appendChild(headTr);
+  table.appendChild(thead);
+
+  const tbody = el("tbody");
+  for (const r of results) {
+    const tr = el("tr");
+    const qTd = el("td", "q-text", r.sample.question);
+    const aTd = el("td", "a-text", (r.sample.answer || "").slice(0, 300));
+    tr.appendChild(qTd);
+    tr.appendChild(aTd);
+    for (const m of EVAL_METRICS) {
+      const v = r.scores[m.key];
+      const td = el("td", "num " + scoreClass(v), v === null || v === undefined || isNaN(v) ? "—" : v.toFixed(2));
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  detail.appendChild(table);
+
+  $("evalStatus").textContent = `评估完成：${results.length} 个样本。分数基于 LLM 评判，仅供参考。`;
+}
+
+/* 运行 RAGAS 评估：生成答案 → LLM 评判各指标 */
+async function runEvaluation() {
+  const settings = collectSettings();
+  if (!settings.apiKey || !settings.model) {
+    $("evalStatus").textContent = "❌ 请先在「设置」中配置 API Key 与模型。";
+    return;
+  }
+  if (!State.chunks.length) {
+    $("evalStatus").textContent = "❌ 请先在「文档」页上传 PDF 并建立索引。";
+    return;
+  }
+
+  const questions = $("evalQuestions").value.split("\n").map((s) => s.trim()).filter(Boolean);
+  if (!questions.length) {
+    $("evalStatus").textContent = "❌ 请至少输入一个测试问题。";
+    return;
+  }
+  const truths = $("evalGroundTruth").value.split("\n").map((s) => s.trim());
+
+  $("runEval").disabled = true;
+  $("evalScores").innerHTML = "";
+  $("evalDetail").innerHTML = "";
+
+  try {
+    // 阶段 1：对每个问题检索 + 生成答案
+    const samples = [];
+    const genSystem =
+      "你是一个严谨的文档问答助手。请仅依据提供的参考片段回答用户问题。\n" +
+      "要求：只使用参考片段中的信息，不要编造；若信息不足请说明；使用与问题相同的语言回答。";
+    for (let i = 0; i < questions.length; i++) {
+      const q = questions[i];
+      setEvalProgress(3 + ((i + 1) / questions.length) * 27, `生成答案 ${i + 1}/${questions.length}…`);
+      const chunks = await evalRetrieve(q, settings);
+      const contexts = chunks.map((c) => c.text);
+      let answer;
+      if (contexts.length) {
+        const context = chunks.map((c, j) => `[${j + 1}]（来源：${c.file} 第${c.page}页）\n${c.text}`).join("\n\n---\n\n");
+        answer = await askLLM(settings, genSystem, `参考片段：\n${context}\n\n用户问题：${q}`);
+      } else {
+        answer = "（未检索到相关内容）";
+      }
+      samples.push({
+        question: q,
+        answer: answer || "",
+        contexts,
+        ground_truth: truths[i] || "",
+      });
+    }
+
+    // 阶段 2：LLM 评判各指标
+    const results = [];
+    const total = samples.length * EVAL_METRICS.length;
+    let done = 0;
+    for (let i = 0; i < samples.length; i++) {
+      const s = samples[i];
+      const scores = {};
+      for (const m of EVAL_METRICS) {
+        done++;
+        setEvalProgress(30 + (done / total) * 68, `评判指标 ${done}/${total}…`);
+        if (m.needTruth && !s.ground_truth) {
+          scores[m.key] = null; // 未提供参考答案，无法计算
+          continue;
+        }
+        scores[m.key] = await judgeMetric(settings, m.key, s);
+      }
+      results.push({ sample: s, scores });
+    }
+
+    setEvalProgress(100, "评估完成，正在渲染结果…");
+    renderEvalResults(results);
+  } catch (e) {
+    $("evalStatus").textContent = `❌ 评估失败：${e.message}`;
+  } finally {
+    $("runEval").disabled = false;
+  }
+}
+
 /* ───────────────────────── 会话区折叠（状态持久化） ───────────────────────── */
 const CONV_PANEL_KEY = "pdfchat.convpanel.collapsed";
 
@@ -1437,6 +1696,15 @@ function bindEvents() {
     }
   });
 
+  // 评估
+  $("saveEvalSet").addEventListener("click", () => {
+    const q = $("evalQuestions").value;
+    const gt = $("evalGroundTruth").value;
+    EvalStore.save(q, gt);
+    $("evalStatus").textContent = "✅ 测试集已保存到本浏览器。";
+  });
+  $("runEval").addEventListener("click", runEvaluation);
+
   // 输入框自适应高度（随内容增高，最多 6 行）
   const questionBox = $("question");
   function autoResize() {
@@ -1518,6 +1786,10 @@ function init() {
     restoreConvPanel();
     renderConvList();
     renderMemories();
+    // 恢复测试集
+    const ev = EvalStore.load();
+    if (ev.questions) $("evalQuestions").value = ev.questions;
+    if (ev.groundTruth) $("evalGroundTruth").value = ev.groundTruth;
     bindEvents();
     const conv = currentConv();
     if (conv) {

@@ -50,6 +50,10 @@
           <span class="nav-label">文档</span>
           <span class="nav-badge" id="docBadge">0</span>
         </button>
+        <button class="nav-item" data-view="eval" type="button">
+          <span class="nav-icon">📊</span>
+          <span class="nav-label">评估</span>
+        </button>
         <button class="nav-item" data-view="settings" type="button">
           <span class="nav-icon">⚙️</span>
           <span class="nav-label">设置</span>
@@ -85,6 +89,44 @@
 
     <!-- ── 主内容区 ── -->
     <main class="content">
+      <!-- ══ 视图：评估 ══ -->
+      <section class="view" id="view-eval">
+        <div class="view-head">
+          <h2>📊 RAG 评估</h2>
+          <p>RAGAS 风格指标：评估检索与生成质量</p>
+        </div>
+        <div class="view-body eval-layout">
+          <div class="card glass eval-config">
+            <h3>测试集</h3>
+            <p class="hint">每行一个测试问题；可填写对应的参考答案（与问题按行对齐，用于计算 recall / correctness）。建议 3-10 个问题，评估会调用 LLM 逐条生成答案并评判。</p>
+
+            <div class="field">
+              <label for="evalQuestions">测试问题（每行一个）</label>
+              <textarea id="evalQuestions" rows="6" placeholder="问题1&#10;问题2&#10;问题3…"></textarea>
+            </div>
+
+            <div class="field">
+              <label for="evalGroundTruth">参考答案（每行一个，与问题对齐，可选）</label>
+              <textarea id="evalGroundTruth" rows="4" placeholder="（可选）参考答案1&#10;参考答案2&#10;…"></textarea>
+            </div>
+
+            <div class="card-actions">
+              <button id="saveEvalSet" class="btn ghost">保存测试集</button>
+              <button id="runEval" class="btn primary">▶ 运行评估</button>
+            </div>
+            <p class="hint" id="evalHint">运行前请确认：已在「文档」页建立索引、已配置 LLM。</p>
+          </div>
+
+          <div class="card glass eval-results">
+            <h3>评估结果</h3>
+            <div class="progress hidden" id="evalProgress"><div class="bar" id="evalProgressBar"></div></div>
+            <p class="hint" id="evalStatus">尚未运行评估。</p>
+            <div id="evalScores" class="eval-scores"></div>
+            <div id="evalDetail" class="eval-detail"></div>
+          </div>
+        </div>
+      </section>
+
       <!-- ══ 视图：设置 ══ -->
       <section class="view" id="view-settings">
         <div class="view-head">
@@ -321,6 +363,6 @@
     开源示例 · API Key 仅发送到你配置的 API 地址 · 文档与索引默认保留在浏览器本地
   </footer>
 
-  <script src="app.js?v=8"></script>
+  <script src="app.js?v=9"></script>
 </body>
 </html>

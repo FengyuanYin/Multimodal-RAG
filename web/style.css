@@ -899,6 +899,52 @@ select option { background: #121a33; color: var(--text); }
   .chat-main .messages { height: 380px; }
 }
 
+/* ── 评估视图 ── */
+.eval-layout { grid-template-columns: 420px 1fr; align-items: start; }
+@media (max-width: 900px) { .eval-layout { grid-template-columns: 1fr; } }
+.eval-results textarea { font-family: inherit; }
+
+.eval-scores {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.eval-score-card {
+  padding: 14px;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border);
+  text-align: center;
+}
+.eval-score-card .name { font-size: 12px; color: var(--text-dim); margin-bottom: 6px; }
+.eval-score-card .val { font-size: 26px; font-weight: 700; line-height: 1; }
+.eval-score-card.good .val { color: var(--success); }
+.eval-score-card.mid .val { color: #fbbf24; }
+.eval-score-card.bad .val { color: var(--danger); }
+.eval-score-card .sub { font-size: 10.5px; color: var(--muted); margin-top: 5px; }
+
+.eval-detail { overflow-x: auto; }
+.eval-detail table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.eval-detail th, .eval-detail td {
+  border: 1px solid var(--border);
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+.eval-detail th { background: rgba(255, 255, 255, 0.05); color: var(--text-dim); white-space: nowrap; }
+.eval-detail td.num { white-space: nowrap; text-align: center; }
+.eval-detail .q-text { max-width: 240px; }
+.eval-detail .a-text { max-width: 320px; word-break: break-word; }
+.eval-detail .na { color: var(--muted); }
+.eval-detail .good { color: var(--success); }
+.eval-detail .mid { color: #fbbf24; }
+.eval-detail .bad { color: var(--danger); }
+
 /* ── 页脚 ── */
 .footer {
   margin-left: var(--sidebar-w);
