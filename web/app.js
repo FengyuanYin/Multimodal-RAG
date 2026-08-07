@@ -840,6 +840,18 @@ function newConversation() {
   return conv;
 }
 
+/* 清空当前会话（保留会话，清空消息） */
+function clearCurrentConversation() {
+  const conv = currentConv();
+  if (!conv) return;
+  conv.messages = [];
+  conv.title = "新对话";
+  conv.updatedAt = Date.now();
+  ConvStore.save(State.convs);
+  renderConvList();
+  renderMessagesFromConv(conv);
+}
+
 function switchConversation(id) {
   const conv = State.convs.find((c) => c.id === id);
   if (!conv) return;
@@ -872,17 +884,23 @@ function renderConvList() {
   list.innerHTML = "";
   $("convCount").textContent = String(State.convs.length);
   if (!State.convs.length) {
-    const empty = el("li", "conv-empty", "暂无会话");
+    const empty = el("li", "conv-empty", "暂无会话，点击「＋ 新建」开始");
     list.appendChild(empty);
+    renderActiveConvInfo();
     return;
   }
   for (const conv of State.convs) {
     const li = el("li", "conv-item" + (conv.id === State.activeConvId ? " active" : ""));
     const label = el("div", "conv-label");
     const title = el("div", "conv-title", conv.title || "新对话");
-    const sub = el("div", "conv-sub", new Date(conv.updatedAt).toLocaleString());
     label.appendChild(title);
-    label.appendChild(sub);
+    const subRow = el("div", "conv-sub");
+    const msgCount = conv.messages ? conv.messages.length : 0;
+    subRow.appendChild(el("span", "conv-sub-time", relTime(conv.updatedAt)));
+    if (msgCount > 0) {
+      subRow.appendChild(el("span", "conv-sub-count", `${msgCount} 条`));
+    }
+    label.appendChild(subRow);
     li.appendChild(label);
     const del = el("button", "conv-del", "🗑");
     del.title = "删除会话";
@@ -894,6 +912,32 @@ function renderConvList() {
     li.addEventListener("click", () => switchConversation(conv.id));
     list.appendChild(li);
   }
+  renderActiveConvInfo();
+}
+
+/* 相对时间显示：刚刚 / N 分钟前 / N 小时前 / 昨天 / 日期 */
+function relTime(ts) {
+  if (!ts) return "";
+  const diff = Date.now() - ts;
+  const min = 60 * 1000;
+  const hour = 60 * min;
+  const day = 24 * hour;
+  if (diff < min) return "刚刚";
+  if (diff < hour) return `${Math.floor(diff / min)} 分钟前`;
+  if (diff < day) return `${Math.floor(diff / hour)} 小时前`;
+  if (diff < 2 * day) return "昨天";
+  const d = new Date(ts);
+  return `${d.getMonth() + 1}/${d.getDate()}`;
+}
+
+/* 对话页头部显示当前会话名 */
+function renderActiveConvInfo() {
+  const info = $("activeConvInfo");
+  if (!info) return;
+  const conv = currentConv();
+  info.textContent = conv
+    ? `当前会话：${conv.title || "新对话"}${conv.messages ? ` · ${conv.messages.length} 条消息` : ""}`
+    : "选择检索范围，基于文档提问";
 }
 
 function renderMessagesFromConv(conv) {
@@ -934,6 +978,31 @@ function pushConvMessage(role, content, meta) {
   }
   saveConversation(conv);
   renderConvList();
+}
+
+/* ───────────────────────── 会话区折叠（状态持久化） ───────────────────────── */
+const CONV_PANEL_KEY = "pdfchat.convpanel.collapsed";
+
+function toggleConvPanel() {
+  const panel = $("sideConv");
+  const collapsed = panel.classList.toggle("collapsed");
+  try {
+    localStorage.setItem(CONV_PANEL_KEY, collapsed ? "1" : "0");
+  } catch (e) { /* ignore */ }
+  if (!collapsed && panel.scrollIntoView) {
+    // 展开时滚动侧边栏到会话区，方便用户看到列表
+    try { $("convHeader").scrollIntoView({ block: "nearest" }); } catch (e) { /* ignore */ }
+  }
+}
+
+function restoreConvPanel() {
+  const panel = $("sideConv");
+  if (!panel) return;
+  try {
+    if (localStorage.getItem(CONV_PANEL_KEY) === "1") {
+      panel.classList.add("collapsed");
+    }
+  } catch (e) { /* ignore */ }
 }
 
 /* ───────────────────────── 第 1 层：短期记忆（最近 N 轮） ───────────────────────── */
@@ -1309,7 +1378,8 @@ function bindEvents() {
   });
 
   // 会话（侧边栏可折叠区）
-  $("newConv").addEventListener("click", () => {
+  $("newConv").addEventListener("click", (e) => {
+    e.stopPropagation(); // 防止冒泡触发折叠切换
     newConversation();
   });
   $("convToggle").addEventListener("click", (e) => {
@@ -1318,6 +1388,24 @@ function bindEvents() {
   });
   $("convHeader").addEventListener("click", () => {
     toggleConvPanel();
+  });
+
+  // 对话头部操作
+  $("newConvTop").addEventListener("click", () => {
+    newConversation();
+  });
+  $("clearConv").addEventListener("click", () => {
+    const conv = currentConv();
+    if (!conv) {
+      addMessage("system", "当前没有会话。");
+      return;
+    }
+    if (conv.messages && conv.messages.length) {
+      clearCurrentConversation();
+      addMessage("system", "当前会话已清空。");
+    } else {
+      addMessage("system", "当前会话已经是空的。");
+    }
   });
 
   // 输入框自适应高度（随内容增高，最多 6 行）
@@ -1385,12 +1473,6 @@ function bindEvents() {
   });
 }
 
-/* ───────────────────────── 会话区折叠 ───────────────────────── */
-function toggleConvPanel() {
-  const panel = $("sideConv");
-  panel.classList.toggle("collapsed");
-}
-
 /* ───────────────────────── 初始化 ───────────────────────── */
 function init() {
   try {
@@ -1404,6 +1486,7 @@ function init() {
       : (State.convs[0] ? State.convs[0].id : "");
     loadSettingsIntoForm();
     renderAll();
+    restoreConvPanel();
     renderConvList();
     renderMemories();
     bindEvents();
@@ -1413,6 +1496,7 @@ function init() {
     } else if (State.docs.length) {
       addMessage("system", `已从本地恢复 ${State.docs.length} 个文档，请建立索引后提问。`);
     }
+    renderActiveConvInfo();
   } catch (e) {
     console.error("初始化失败（已降级继续运行）:", e);
     // 尽力保证导航可用（事件委托已在顶层注册），并重新绑定基础事件

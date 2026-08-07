@@ -281,9 +281,11 @@
         <div class="view-head chat-head">
           <div class="head-text">
             <h2>💬 对话</h2>
-            <p>选择检索范围，基于文档提问 · 支持多会话与长期记忆</p>
+            <p id="activeConvInfo">选择检索范围，基于文档提问</p>
           </div>
           <div class="chat-filters">
+            <button id="newConvTop" class="btn small ghost" type="button" title="新建会话">＋ 新建</button>
+            <button id="clearConv" class="btn small ghost" type="button" title="清空当前会话消息">清空会话</button>
             <div class="field inline">
               <label for="chatCat">检索范围</label>
               <select id="chatCat">
@@ -319,6 +321,6 @@
     开源示例 · API Key 仅发送到你配置的 API 地址 · 文档与索引默认保留在浏览器本地
   </footer>
 
-  <script src="app.js?v=6"></script>
+  <script src="app.js?v=7"></script>
 </body>
 </html>
