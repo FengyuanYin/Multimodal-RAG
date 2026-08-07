@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>PDF Chat · BYOK 私有 RAG</title>
   <meta name="description" content="浏览器本地 PDF 问答工具：上传 PDF，自带 API Key，数据不出浏览器。" />
-  <link rel="stylesheet" href="style.css?v=3" />
+  <link rel="stylesheet" href="style.css?v=4" />
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
   <script>
     // pdf.js 使用限制（必须设置 workerSrc 才能解析 PDF）
@@ -47,7 +47,7 @@
         </button>
         <button class="nav-item" data-view="docs" type="button">
           <span class="nav-icon">📚</span>
-          <span class="nav-label">文档</span>
+          <span class="nav-label">知识库</span>
           <span class="nav-badge" id="docBadge">0</span>
         </button>
         <button class="nav-item" data-view="eval" type="button">
@@ -299,27 +299,58 @@
         </div>
       </section>
 
-      <!-- ══ 视图 2：文档 ══ -->
+      <!-- ══ 视图 2：知识库 ══ -->
       <section class="view" id="view-docs">
         <div class="view-head">
-          <h2>📚 文档</h2>
-          <p>分类管理你的 PDF，建立检索索引</p>
+          <h2>📚 知识库</h2>
+          <p>上传 PDF 或从 Web 搜索抓取网页，构建本地检索知识库</p>
         </div>
         <div class="view-body docs-layout">
           <!-- 左：分类管理 -->
           <div class="card glass cat-panel">
-            <h3>文档分类</h3>
+            <h3>知识库分类</h3>
             <div class="cat-add">
               <input type="text" id="newCatName" placeholder="新分类名称" />
               <button id="addCat" class="btn small primary" type="button">新增</button>
             </div>
             <ul id="catList" class="cat-list"></ul>
-            <p class="hint">删除分类不会删除文档，文档会移回「未分类」。</p>
+            <p class="hint">删除分类不会删除内容，条目会移回「未分类」。</p>
           </div>
 
-          <!-- 右：上传与列表 -->
+          <!-- 右：Web 抓取 + 上传 + 列表 -->
           <div class="card glass docs-panel">
-            <h3>上传文档</h3>
+            <!-- ══ Web 搜索与抓取 ══ -->
+            <div class="web-panel">
+              <h3>🌐 Web 搜索与抓取</h3>
+              <p class="hint">搜索互联网或直接粘贴网址，把网页正文抓取进知识库。直连模式受浏览器 CORS 限制，建议使用「同源代理」模式（自托管 web/proxy.py）。</p>
+
+              <div class="web-search-row">
+                <select id="webProvider" title="搜索服务提供商">
+                  <option value="duckduckgo">DuckDuckGo（免费，无需 Key）</option>
+                  <option value="tavily">Tavily（需 API Key，专为 RAG 设计）</option>
+                </select>
+                <input type="text" id="webSearchQuery" placeholder="输入搜索关键词，如：大语言模型 2024 综述" />
+                <button id="webSearchBtn" class="btn primary" type="button">🔍 搜索</button>
+              </div>
+
+              <div class="field hidden" id="webTavilyConfig">
+                <label for="webTavilyKey">Tavily API Key</label>
+                <div class="key-row">
+                  <input type="password" id="webTavilyKey" placeholder="tvly-..." autocomplete="off" />
+                  <p class="hint">前往 <a href="https://tavily.com" target="_blank" rel="noopener">tavily.com</a> 获取。</p>
+                </div>
+              </div>
+
+              <div id="webResults" class="web-results"></div>
+
+              <div class="web-url-row">
+                <input type="text" id="webUrlInput" placeholder="直接粘贴网址（每行一个，如 https://example.com/article）" />
+                <button id="webFetchBtn" class="btn primary" type="button">⬇ 抓取网页</button>
+              </div>
+            </div>
+
+            <!-- ══ PDF 上传 ══ -->
+            <h3>上传 PDF</h3>
             <div class="upload-row">
               <div id="dropZone" class="dropzone" role="button" tabindex="0" aria-label="上传 PDF">
                 <div class="dz-icon" aria-hidden="true">
@@ -339,7 +370,7 @@
               </div>
             </div>
 
-            <div class="doc-stats" id="docStats">未加载文档</div>
+            <div class="doc-stats" id="docStats">未加载条目</div>
             <ul id="docList" class="doc-list"></ul>
 
             <button id="buildIndex" class="btn primary btn-lg" disabled>建立索引</button>
@@ -405,6 +436,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=10"></script>
+  <script src="app.js?v=11"></script>
 </body>
 </html>

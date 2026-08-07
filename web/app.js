@@ -813,6 +813,10 @@ function loadSettingsIntoForm() {
   $("vlmApiKey").value = s.vlmApiKey || "";
   $("vlmBaseUrl").value = s.vlmBaseUrl || "";
   $("vlmModel").value = s.vlmModel || "";
+  // Web 搜索配置（知识库 Web 抓取）
+  $("webProvider").value = s.webProvider || "duckduckgo";
+  $("webTavilyKey").value = s.webTavilyKey || "";
+  syncWebProviderUI();
   $("enableMemory").checked = s.enableMemory !== false;
   $("memoryRounds").value = s.memoryRounds || 10;
   syncParserUI();
@@ -838,9 +842,16 @@ function collectSettings() {
     vlmApiKey: $("vlmApiKey").value.trim(),
     vlmBaseUrl: $("vlmBaseUrl").value.trim().replace(/\/+$/, ""),
     vlmModel: $("vlmModel").value.trim(),
+    webProvider: $("webProvider").value,
+    webTavilyKey: $("webTavilyKey").value.trim(),
     enableMemory: $("enableMemory").checked,
     memoryRounds: parseInt($("memoryRounds").value, 10) || 10,
   };
+}
+
+function syncWebProviderUI() {
+  const useTavily = $("webProvider").value === "tavily";
+  $("webTavilyConfig").classList.toggle("hidden", !useTavily);
 }
 
 function syncParserUI() {
@@ -982,14 +993,27 @@ function chatCatFilter() {
   return (chunk) => chunk.cat === catId;
 }
 
-/* ───────────────────────── 文档渲染 ───────────────────────── */
+/* ───────────────────────── 文档渲染（知识库条目） ───────────────────────── */
 function renderDocList() {
   const list = $("docList");
   list.innerHTML = "";
   for (const doc of State.docs) {
     const li = el("li");
-    li.appendChild(el("span", "", doc.name || "未命名文档"));
-    li.appendChild(el("span", "pages", fmtPages(doc.pages ? doc.pages.length : 0)));
+    const type = doc.parser === "web" ? "🌐 网页" : doc.parser === "mineru" ? "⚙️ MinerU" : "📄 PDF";
+    const titleWrap = el("div", "doc-title-wrap");
+    const titleRow = el("div", "doc-title-row");
+    titleRow.appendChild(el("span", "doc-type", type));
+    titleRow.appendChild(el("span", "", doc.name || "未命名"));
+    titleWrap.appendChild(titleRow);
+    if (doc.url) {
+      const urlLink = el("a", "doc-url", doc.url);
+      urlLink.href = doc.url;
+      urlLink.target = "_blank";
+      urlLink.rel = "noopener noreferrer";
+      titleWrap.appendChild(urlLink);
+    }
+    titleWrap.appendChild(el("span", "pages", fmtPages(doc.pages ? doc.pages.length : 0)));
+    li.appendChild(titleWrap);
 
     const sel = el("select", "cat-select");
     sel.appendChild(new Option("未分类", ""));
@@ -1007,7 +1031,7 @@ function renderDocList() {
     li.appendChild(sel);
 
     const del = el("button", "del-doc", "🗑");
-    del.title = "删除文档";
+    del.title = "删除条目";
     del.addEventListener("click", () => {
       State.docs = State.docs.filter((d) => d.id !== doc.id);
       Store.saveDocs(State.docs);
@@ -1016,7 +1040,9 @@ function renderDocList() {
     li.appendChild(del);
     list.appendChild(li);
   }
-  $("docStats").textContent = `共 ${State.docs.length} 个文档 / ${State.docs.reduce((s, d) => s + (d.pages ? d.pages.length : 0), 0)} 页 / ${State.docs.reduce((s, d) => s + ((d.media && d.media.length) || 0), 0)} 处图/表引用`;
+  const webCount = State.docs.filter((d) => d.parser === "web").length;
+  const pdfCount = State.docs.length - webCount;
+  $("docStats").textContent = `共 ${State.docs.length} 个条目（PDF ${pdfCount} / 网页 ${webCount}） / ${State.docs.reduce((s, d) => s + (d.pages ? d.pages.length : 0), 0)} 页`;
   $("docBadge").textContent = String(State.docs.length);
   $("buildIndex").disabled = State.docs.length === 0;
 }
@@ -1035,6 +1061,178 @@ function renderAll() {
   renderCatList();
   renderCatSelects();
   renderDocList();
+}
+
+/* ───────────────────────── Web 搜索与网页抓取（知识库） ───────────────────────── */
+function webApiBase(settings) {
+  // 同源代理模式下所有 Web 抓取/搜索都经 /proxy/web/*
+  return settings.callMode === "proxy" ? "/proxy/web" : null;
+}
+
+async function webFetchUrl(url, settings) {
+  // 1) 优先经同源代理（自托管 web/proxy.py 时可用，绕过 CORS）
+  const base = webApiBase(settings);
+  if (base) {
+    const resp = await fetch(`${base}/fetch?url=${encodeURIComponent(url)}`);
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `抓取失败 ${resp.status}`);
+    return data;
+  }
+  // 2) 直连尝试（仅当目标网站允许 CORS 时可用，多数情况会被浏览器拦截）
+  const resp = await fetch(url, { method: "GET", mode: "cors" });
+  if (!resp.ok) throw new Error(`网页请求失败 ${resp.status}`);
+  const html = await resp.text();
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  const titleEl = doc.querySelector("title");
+  const title = (titleEl && titleEl.textContent ? titleEl.textContent : "").trim() || url;
+  doc.querySelectorAll("script,style,noscript,nav,footer,header,aside,iframe,svg").forEach((n) => n.remove());
+  const body = doc.body;
+  const text = (body && body.innerText ? body.innerText : "").replace(/\n{3,}/g, "\n\n").trim();
+  if (!text) throw new Error("网页未提取到正文（可能为动态渲染页面）");
+  return { url, title, text };
+}
+
+async function webSearch(query, settings) {
+  const provider = settings.webProvider || "duckduckgo";
+  const base = webApiBase(settings);
+  if (base) {
+    const resp = await fetch(`${base}/search`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query, provider, api_key: settings.webTavilyKey || "", max_results: 6 }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `搜索失败 ${resp.status}`);
+    return data.results || [];
+  }
+  // 直连：仅 Tavily 支持浏览器 CORS 时可用
+  if (provider === "tavily" && settings.webTavilyKey) {
+    const resp = await fetch("https://api.tavily.com/search", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ api_key: settings.webTavilyKey, query, max_results: 6 }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `搜索失败 ${resp.status}`);
+    return (data.results || []).map((r) => ({ title: r.title, url: r.url, snippet: r.content || "" }));
+  }
+  throw new Error("直连模式搜索需要服务支持 CORS，请改用「同源代理」模式（自托管 web/proxy.py）");
+}
+
+function renderWebResults(results, settings) {
+  const box = $("webResults");
+  box.innerHTML = "";
+  if (!results || !results.length) {
+    box.appendChild(el("p", "hint", "未找到相关结果。"));
+    return;
+  }
+  const list = el("div", "web-result-list");
+  results.forEach((r, i) => {
+    const item = el("div", "web-result");
+    const head = el("div", "web-result-head");
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.className = "web-result-check";
+    cb.dataset.url = r.url;
+    cb.checked = i === 0; // 默认勾选第一个
+    head.appendChild(cb);
+    const link = document.createElement("a");
+    link.href = r.url;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.textContent = r.title || r.url;
+    head.appendChild(link);
+    item.appendChild(head);
+    item.appendChild(el("div", "web-result-url", r.url));
+    if (r.snippet) item.appendChild(el("div", "web-result-snippet", r.snippet));
+    const fetchBtn = el("button", "btn small ghost web-result-fetch", "＋ 抓取此页");
+    fetchBtn.addEventListener("click", () => fetchWebDocs([r.url], collectSettings()));
+    item.appendChild(fetchBtn);
+    list.appendChild(item);
+  });
+  box.appendChild(list);
+  const fetchSel = el("button", "btn primary web-fetch-selected", "⬇ 抓取选中页面");
+  fetchSel.addEventListener("click", handleWebFetchSelected);
+  box.appendChild(fetchSel);
+}
+
+async function handleWebSearch() {
+  const settings = collectSettings();
+  const q = $("webSearchQuery").value.trim();
+  if (!q) {
+    addMessage("system", "请输入搜索关键词。");
+    return;
+  }
+  const box = $("webResults");
+  box.innerHTML = "";
+  box.appendChild(el("p", "hint", "🔍 搜索中…"));
+  try {
+    const results = await webSearch(q, settings);
+    renderWebResults(results, settings);
+  } catch (e) {
+    box.innerHTML = "";
+    box.appendChild(el("p", "hint error-text", `搜索失败：${e.message}`));
+    addMessage("error", `Web 搜索失败：${e.message}`);
+  }
+}
+
+async function handleWebFetch() {
+  const settings = collectSettings();
+  const raw = $("webUrlInput").value;
+  const urls = raw.split("\n").map((s) => s.trim()).filter((s) => /^https?:\/\//i.test(s));
+  if (!urls.length) {
+    addMessage("system", "请粘贴一个或多个 http/https 网址（每行一个）。");
+    return;
+  }
+  await fetchWebDocs(urls, settings);
+}
+
+async function handleWebFetchSelected() {
+  const settings = collectSettings();
+  const urls = [...document.querySelectorAll(".web-result-check:checked")].map((cb) => cb.dataset.url);
+  if (!urls.length) {
+    addMessage("system", "请先勾选要抓取的搜索结果。");
+    return;
+  }
+  await fetchWebDocs(urls, settings);
+}
+
+async function fetchWebDocs(urls, settings) {
+  const targetCat = $("uploadCat").value;
+  let ok = 0;
+  for (const url of urls) {
+    addMessage("system", `🌐 正在抓取：${url}…`);
+    try {
+      const data = await webFetchUrl(url, settings);
+      if (!data.text || !data.text.trim()) {
+        addMessage("error", `抓取 ${url} 未提取到正文。`);
+        continue;
+      }
+      addWebDoc({ title: data.title || url, url: data.url || url, text: data.text, cat: targetCat });
+      ok++;
+    } catch (e) {
+      addMessage("error", `抓取 ${url} 失败：${e.message}`);
+    }
+  }
+  if (ok) addMessage("system", `✅ 已抓取 ${ok} 个网页加入知识库。`);
+}
+
+function addWebDoc({ title, url, text, cat }) {
+  const doc = {
+    id: uid("doc"),
+    name: title || url,
+    cat: cat || "",
+    pages: [{ page: 1, text }],
+    parser: "web",
+    url,
+    addedAt: Date.now(),
+    media: [],
+  };
+  State.docs.push(doc);
+  Store.saveDocs(State.docs);
+  invalidateIndex();
+  renderAll();
+  return doc;
 }
 
 /* ───────────────────────── 上传处理 ───────────────────────── */
@@ -2091,6 +2289,17 @@ function bindEvents() {
     renderCatList();
     renderCatSelects();
   });
+
+  // Web 搜索与抓取（知识库）
+  $("webProvider").addEventListener("change", syncWebProviderUI);
+  $("webSearchBtn").addEventListener("click", handleWebSearch);
+  $("webSearchQuery").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      handleWebSearch();
+    }
+  });
+  $("webFetchBtn").addEventListener("click", handleWebFetch);
 
   // 上传
   const dz = $("dropZone");

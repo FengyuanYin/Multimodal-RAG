@@ -46,12 +46,17 @@ It can be used either as a **Python package** (`import agentic_rag`) or as a **F
 
 ## Web App: Browser-local PDF Chat
 
+The `web/` folder is a **pure front-end** PDF Q&A tool (BYOK — Bring Your Own Key): upload PDFs, or **search the web / paste URLs to grab web pages into your knowledge base**, build a local index (BM25 + optional embeddings), and chat with citations. Documents and keys never leave the browser (except when you explicitly choose the MinerU parser or the self-hosted proxy for web fetching).
+
+See [web/README.md](web/README.md) for details.
+
 A **pure front-end** PDF QA page lives in [`web/`](web/README.md). Visitors can:
 
 1. Upload their own PDFs (parsed entirely in the browser — nothing is uploaded to any server)
-2. Bring their own API Key and LLM configuration (Key stays in `localStorage`, only sent to the API endpoint they configured)
-3. Build a local index (BM25 keyword search by default; optional Embedding API for vector-enhanced retrieval)
-4. Ask questions against their documents, with cited sources
+2. **Search the web / paste URLs to grab web pages into the knowledge base** (via the optional same-origin proxy; DuckDuckGo free search or Tavily)
+3. Bring their own API Key and LLM configuration (Key stays in `localStorage`, only sent to the API endpoint they configured)
+4. Build a local index (BM25 keyword search by default; optional Embedding API for vector-enhanced retrieval)
+5. Ask questions against their documents, with cited sources
 
 **Deploy it to GitHub Pages in minutes** — no backend needed:
 
@@ -60,6 +65,7 @@ A **pure front-end** PDF QA page lives in [`web/`](web/README.md). Visitors can:
 - Open `https://<username>.github.io/<repo>/web/`
 
 > If your LLM provider does not support browser CORS, self-host the optional same-origin proxy: `python -m uvicorn web.proxy:app --host 0.0.0.0 --port 8000`.
+> Web search & page fetching also go through this proxy (`/proxy/web/search`, `/proxy/web/fetch`), since most websites block browser CORS.
 
 ---
 

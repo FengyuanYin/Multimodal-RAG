@@ -1017,6 +1017,101 @@ select option { background: #121a33; color: var(--text); }
 .modal-box p { margin: 0 0 18px; color: var(--text-dim); font-size: 13px; line-height: 1.6; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 10px; }
 
+/* ── Web 搜索与抓取（知识库） ── */
+.web-panel {
+  border: 1px dashed var(--border);
+  border-radius: 12px;
+  padding: 14px 16px;
+  margin-bottom: 20px;
+  background: rgba(255, 255, 255, 0.02);
+}
+.web-panel h3 { margin: 0 0 6px; }
+.web-search-row {
+  display: flex;
+  gap: 8px;
+  margin: 10px 0 6px;
+}
+.web-search-row select,
+.web-search-row input {
+  flex: 1;
+  min-width: 0;
+}
+.web-search-row select { flex: 0 0 200px; }
+.web-url-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+.web-url-row input { flex: 1; }
+.web-results {
+  margin-top: 12px;
+  max-height: 340px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.web-result {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.03);
+}
+.web-result-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.web-result-check { margin-top: 3px; }
+.web-result-head a {
+  color: var(--accent);
+  text-decoration: none;
+  font-weight: 600;
+  font-size: 13px;
+  word-break: break-all;
+}
+.web-result-head a:hover { text-decoration: underline; }
+.web-result-url {
+  font-size: 11px;
+  color: var(--muted);
+  margin: 4px 0 2px 22px;
+  word-break: break-all;
+}
+.web-result-snippet {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin: 2px 0 6px 22px;
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.web-result-fetch { margin-left: 22px; }
+.web-fetch-selected { align-self: flex-end; }
+.error-text { color: var(--danger, #f87171); }
+
+/* 知识库条目列表：类型标记 + URL */
+.doc-title-wrap { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.doc-title-row { display: flex; align-items: center; gap: 6px; }
+.doc-type {
+  flex: none;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(99, 102, 241, 0.16);
+  border: 1px solid rgba(99, 102, 241, 0.3);
+  color: var(--accent);
+}
+.doc-url {
+  font-size: 11px;
+  color: var(--muted);
+  word-break: break-all;
+  text-decoration: none;
+}
+.doc-url:hover { text-decoration: underline; color: var(--accent); }
+.doc-list li { display: flex; align-items: center; gap: 10px; }
+
 /* ── 响应式 ── */
 @media (max-width: 860px) {
   .sidebar {
