@@ -870,6 +870,7 @@ function deleteConversation(id) {
 function renderConvList() {
   const list = $("convList");
   list.innerHTML = "";
+  $("convCount").textContent = String(State.convs.length);
   if (!State.convs.length) {
     const empty = el("li", "conv-empty", "暂无会话");
     list.appendChild(empty);
@@ -1307,11 +1308,30 @@ function bindEvents() {
     input.type = input.type === "password" ? "text" : "password";
   });
 
-  // 会话
+  // 会话（侧边栏可折叠区）
   $("newConv").addEventListener("click", () => {
     newConversation();
-    $("messages").innerHTML = "";
-    addMessage("system", "已创建新会话。");
+  });
+  $("convToggle").addEventListener("click", (e) => {
+    e.stopPropagation();
+    toggleConvPanel();
+  });
+  $("convHeader").addEventListener("click", () => {
+    toggleConvPanel();
+  });
+
+  // 输入框自适应高度（随内容增高，最多 6 行）
+  const questionBox = $("question");
+  function autoResize() {
+    questionBox.style.height = "auto";
+    questionBox.style.height = Math.min(questionBox.scrollHeight, 132) + "px";
+  }
+  questionBox.addEventListener("input", autoResize);
+  questionBox.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      $("chatForm").requestSubmit();
+    }
   });
 
   // 分类
@@ -1360,14 +1380,15 @@ function bindEvents() {
     const q = $("question").value.trim();
     if (!q) return;
     $("question").value = "";
+    autoResize();
     handleAsk(q);
   });
-  $("question").addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      $("chatForm").requestSubmit();
-    }
-  });
+}
+
+/* ───────────────────────── 会话区折叠 ───────────────────────── */
+function toggleConvPanel() {
+  const panel = $("sideConv");
+  panel.classList.toggle("collapsed");
 }
 
 /* ───────────────────────── 初始化 ───────────────────────── */

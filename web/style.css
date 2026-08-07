@@ -108,6 +108,7 @@ body {
   flex-direction: column;
   padding: 22px 14px 18px;
   background: rgba(10, 16, 32, 0.85);
+  overflow-y: auto;
 }
 .side-brand { display: flex; align-items: center; gap: 12px; padding: 0 6px 20px; }
 .logo {
@@ -651,11 +652,12 @@ select option { background: #121a33; color: var(--text); }
 }
 .chat-form textarea {
   flex: 1;
-  resize: vertical;
-  min-height: 52px;
-  max-height: 160px;
-  padding: 13px 14px;
+  resize: none;
+  min-height: 46px;
+  max-height: 132px;
+  padding: 12px 14px;
   line-height: 1.5;
+  overflow-y: auto;
 }
 .send-btn {
   width: 52px;
@@ -665,40 +667,95 @@ select option { background: #121a33; color: var(--text); }
   border-radius: 14px;
 }
 
-/* ── 会话管理布局 ── */
-.chat-layout {
-  display: flex;
-  gap: 16px;
-  align-items: stretch;
-  flex: 1;
-  min-height: 0;
-}
-.conv-side {
-  width: 230px;
-  flex: none;
-  padding: 14px;
+/* ── 侧边栏会话区（可折叠） ── */
+.side-conv {
+  margin-top: 8px;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  border-radius: var(--radius);
+  min-height: 0;
 }
-.btn-sm { padding: 8px 12px; font-size: 12.5px; margin-top: 0; }
+.conv-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s;
+}
+.conv-header:hover { background: rgba(255, 255, 255, 0.05); }
+.conv-header .conv-title {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--text-dim);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.conv-count {
+  font-size: 10.5px;
+  color: var(--text-dim);
+  background: rgba(99, 102, 241, 0.15);
+  border: 1px solid rgba(99, 102, 241, 0.25);
+  padding: 1px 8px;
+  border-radius: 999px;
+  min-width: 20px;
+  text-align: center;
+}
+.conv-new, .conv-toggle {
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-dim);
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 0;
+  transition: all 0.15s;
+}
+.conv-new:hover, .conv-toggle:hover {
+  background: rgba(99, 102, 241, 0.2);
+  color: #fff;
+  border-color: rgba(99, 102, 241, 0.4);
+}
+.conv-body {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  transition: max-height 0.25s ease, opacity 0.2s ease;
+  max-height: 520px;
+}
+.side-conv.collapsed .conv-body {
+  max-height: 0;
+  opacity: 0;
+}
+.side-conv.collapsed .conv-toggle {
+  transform: rotate(-90deg);
+}
 
 .conv-list {
   list-style: none;
-  margin: 0;
+  margin: 6px 0 0;
   padding: 0;
-  flex: 1;
+  max-height: 240px;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
 }
 .conv-item {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 9px 10px;
+  gap: 6px;
+  padding: 7px 9px;
   border-radius: var(--radius-sm);
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid rgba(255, 255, 255, 0.06);
@@ -712,25 +769,26 @@ select option { background: #121a33; color: var(--text); }
 }
 .conv-label { flex: 1; min-width: 0; }
 .conv-title {
-  font-size: 12.5px;
+  font-size: 12px;
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.conv-sub { font-size: 10.5px; color: var(--muted); margin-top: 2px; }
+.conv-sub { font-size: 10px; color: var(--muted); margin-top: 1px; }
 .conv-del {
   border: none;
   background: none;
   color: var(--muted);
   cursor: pointer;
-  font-size: 12px;
-  padding: 3px 5px;
+  font-size: 11px;
+  padding: 3px 4px;
   border-radius: 6px;
   transition: all 0.15s;
+  flex: none;
 }
 .conv-del:hover { color: var(--danger); background: var(--danger-bg); }
-.conv-empty { color: var(--muted); font-size: 12px; text-align: center; padding: 12px 0; }
+.conv-empty { color: var(--muted); font-size: 12px; text-align: center; padding: 10px 0; }
 
 .mem-box {
   border-top: 1px solid var(--border);
@@ -802,8 +860,7 @@ select option { background: #121a33; color: var(--text); }
 }
 
 @media (max-width: 700px) {
-  .chat-layout { flex-direction: column; height: auto; }
-  .conv-side { width: 100%; max-height: 220px; }
+  .side-conv { display: none; }
   .chat-main .messages { height: 380px; }
 }
 
