@@ -1,0 +1,161 @@
+"""
+组件工厂模块
+============
+同步构建完整的 Agentic 编排器及其所有依赖组件。
+供 FastAPI 启动流程与 AgenticRAG 高层客户端复用。
+"""
+
+from loguru import logger
+
+from agentic_rag.config import settings as default_settings
+
+
+def build_orchestrator(settings_obj=None):
+    """
+    构建编排器及所有依赖组件
+
+    Args:
+        settings_obj: 可选配置对象（默认使用全局 settings）
+
+    Returns:
+        AgenticOrchestrator: 配置完成的编排器实例
+    """
+    from agentic_rag.core.orchestrator import AgenticOrchestrator
+    from agentic_rag.core.hybrid_router import HybridRouter
+    from agentic_rag.core.query_rewriter import QueryRewriter
+    from agentic_rag.rag.standard_rag import StandardRAGEngine
+    from agentic_rag.rag.graph_rag import GraphRAGEngine, EntityRelationExtractor
+    from agentic_rag.rag.hybrid_retriever import HybridRetriever
+    from agentic_rag.memory.vector_store import VectorStoreFactory
+    from agentic_rag.memory.graph_store import GraphStoreFactory
+    from agentic_rag.processing.embedders import EmbedderFactory
+    from agentic_rag.processing.reranker import RerankerFactory
+
+    cfg = settings_obj or default_settings
+
+    # 1. LLM 客户端
+    llm_client = None
+    if getattr(cfg, "llm_api_key", None):
+        try:
+            from openai import OpenAI
+            llm_client = OpenAI(
+                api_key=cfg.llm_api_key,
+                base_url=getattr(cfg, "llm_base_url", None),
+            )
+            logger.info(f"LLM 客户端初始化: {cfg.llm_model}")
+        except Exception as e:
+            logger.warning(f"LLM 客户端初始化失败: {e}")
+
+    # 2. 嵌入器
+    embedder = None
+    try:
+        embedder = EmbedderFactory.create(
+            provider="bge" if "bge" in cfg.embedding_model else "openai",
+            model_name=cfg.embedding_model,
+            device=cfg.embedding_device,
+            dim=cfg.embedding_dim,
+            api_key=getattr(cfg, "llm_api_key", None),
+        )
+        logger.info(f"嵌入器初始化: {cfg.embedding_model}")
+    except Exception as e:
+        logger.warning(f"嵌入器初始化失败: {e}")
+
+    # 3. 向量存储
+    vector_store = None
+    try:
+        vector_store = VectorStoreFactory.create(
+            db_type=cfg.vector_db_type,
+            collection_name="default",
+            embedding_dim=cfg.embedding_dim,
+            persist_dir=cfg.vector_db_path,
+            host=cfg.qdrant_host,
+            port=cfg.qdrant_port,
+        )
+        logger.info(f"向量存储初始化: {cfg.vector_db_type}")
+    except Exception as e:
+        logger.warning(f"向量存储初始化失败: {e}")
+
+    # 4. 图存储
+    graph_store = None
+    try:
+        graph_store = GraphStoreFactory.create(
+            db_type=cfg.graph_db_type,
+            uri=getattr(cfg, "neo4j_uri", None),
+            user=getattr(cfg, "neo4j_user", None),
+            password=getattr(cfg, "neo4j_password", None),
+        )
+        logger.info(f"图存储初始化: {cfg.graph_db_type}")
+    except Exception as e:
+        logger.warning(f"图存储初始化失败: {e}")
+
+    # 5. 重排序器
+    reranker = None
+    try:
+        reranker = RerankerFactory.create(
+            provider="bge",
+            model_name=cfg.reranker_model,
+            device=cfg.reranker_device,
+        )
+        logger.info(f"重排序器初始化: {cfg.reranker_model}")
+    except Exception as e:
+        logger.warning(f"重排序器初始化失败: {e}")
+
+    # 6. 混合检索器
+    hybrid_retriever = HybridRetriever(
+        vector_store=vector_store,
+        graph_store=graph_store,
+        embedder=embedder,
+    )
+    # 从持久化文件重建 BM25 索引（服务重启 / 新进程时保留已摄入文档）
+    try:
+        hybrid_retriever.load_persisted_index()
+    except Exception as e:
+        logger.warning(f"加载持久化索引失败: {e}")
+
+    # 7. 混合路由器
+    hybrid_router = HybridRouter(
+        llm_client=llm_client,
+        confidence_threshold=cfg.router_confidence_threshold,
+        enable_fallback=cfg.enable_fallback,
+        llm_model=cfg.llm_model,
+    )
+
+    # 8. 查询重写器
+    query_rewriter = QueryRewriter(llm_client=llm_client, llm_model=cfg.llm_model)
+
+    # 9. 标准 RAG 引擎
+    standard_rag = StandardRAGEngine(
+        retriever=hybrid_retriever,
+        reranker=reranker,
+        embedder=embedder,
+        llm_client=llm_client,
+        llm_model=cfg.llm_model,
+        top_k_rerank=cfg.top_k_rerank,
+    )
+
+    # 10. GraphRAG 引擎
+    extractor = EntityRelationExtractor(llm_client=llm_client, llm_model=cfg.llm_model)
+    graph_rag = GraphRAGEngine(
+        graph_store=graph_store,
+        vector_store=vector_store,
+        embedder=embedder,
+        reranker=reranker,
+        llm_client=llm_client,
+        llm_model=cfg.llm_model,
+        extractor=extractor,
+    )
+
+    # 11. 编排器
+    orchestrator = AgenticOrchestrator(
+        router=hybrid_router,
+        query_rewriter=query_rewriter,
+        standard_rag=standard_rag,
+        graph_rag=graph_rag,
+        hybrid_retriever=hybrid_retriever,
+        reranker=reranker,
+        llm_client=llm_client,
+        llm_model=cfg.llm_model,
+    )
+
+    logger.info("所有组件初始化完成")
+    return orchestrator

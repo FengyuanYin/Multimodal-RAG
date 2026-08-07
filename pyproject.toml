@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentic-rag"
+version = "0.1.0"
+description = "Agentic GraphRAG 智能问答系统：混合路由 + 多模态记忆 + 高级 RAG 模式"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+keywords = ["rag", "graphrag", "llm", "fastapi", "retrieval"]
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "openai>=1.30",
+    "networkx>=3.2",
+    "numpy>=1.26",
+    "loguru>=0.7",
+    "rank-bm25>=0.2.2",
+    "jieba>=0.42.1",
+    "python-multipart>=0.0.9",
+]
+
+[project.optional-dependencies]
+all = [
+    "torch", "torchvision", "transformers", "sentence-transformers",
+    "unstructured[pdf]", "chromadb", "qdrant-client",
+    "pillow", "pytesseract", "tabula-py", "camelot-py", "pandas",
+    "pytest", "pytest-asyncio",
+]
+local-models = ["torch", "torchvision", "transformers", "sentence-transformers"]
+pdf = ["unstructured[pdf]"]
+vector-db = ["chromadb", "qdrant-client"]
+image = ["pillow", "pytesseract"]
+table = ["tabula-py", "camelot-py", "pandas"]
+dev = ["pytest", "pytest-asyncio"]
+
+[tool.setuptools.packages.find]
+include = ["agentic_rag*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

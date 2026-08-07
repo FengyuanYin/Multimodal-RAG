@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PDF Chat · BYOK 私有 RAG</title>
+  <meta name="description" content="浏览器本地 PDF 问答工具：上传 PDF，自带 API Key，数据不出浏览器。" />
+  <link rel="stylesheet" href="style.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script>
+    // pdf.js 使用限制（必须设置 workerSrc 才能解析 PDF）
+    pdfjsLib.GlobalWorkerOptions.workerSrc =
+      "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+  </script>
+</head>
+<body>
+  <header class="topbar">
+    <h1>📄 PDF Chat</h1>
+    <p class="subtitle">浏览器本地 PDF 问答 · 自带 API Key · 文档与密钥均不出浏览器</p>
+  </header>
+
+  <main class="layout">
+    <!-- ── 左侧：设置 ── -->
+    <aside class="panel settings">
+      <h2>⚙️ LLM 设置</h2>
+      <p class="hint">密钥仅保存在本浏览器（localStorage），仅发送到你填写的 API 地址。</p>
+
+      <label for="apiKey">API Key <span class="req">*</span></label>
+      <div class="key-row">
+        <input type="password" id="apiKey" placeholder="sk-..." autocomplete="off" />
+        <button id="toggleKey" type="button" title="显示/隐藏">👁</button>
+      </div>
+
+      <label for="callMode">API 调用方式</label>
+      <select id="callMode">
+        <option value="direct">直连（需提供商支持 CORS）</option>
+        <option value="proxy">同源代理（自托管 web/proxy.py）</option>
+      </select>
+
+      <label for="baseUrl">Base URL（OpenAI 兼容）</label>
+      <input type="text" id="baseUrl" placeholder="https://api.openai.com/v1" />
+
+      <label for="model">模型</label>
+      <input type="text" id="model" placeholder="gpt-4o-mini" />
+
+      <label for="embedModel">Embedding 模型（可选，用于向量检索增强）</label>
+      <input type="text" id="embedModel" placeholder="留空则仅用关键词检索" />
+
+      <div class="row2">
+        <div>
+          <label for="topK">检索块数</label>
+          <input type="number" id="topK" min="1" max="20" value="5" />
+        </div>
+        <div>
+          <label for="chunkSize">分块字符数</label>
+          <input type="number" id="chunkSize" min="100" max="4000" value="800" />
+        </div>
+      </div>
+
+      <button id="saveSettings" class="btn primary">保存设置</button>
+      <button id="clearData" class="btn ghost">清除本地数据</button>
+    </aside>
+
+    <!-- ── 中间：文档 ── -->
+    <section class="panel docs">
+      <h2>📚 文档</h2>
+      <div id="dropZone" class="dropzone">
+        <p>点击或拖拽 PDF 到此处</p>
+        <input type="file" id="fileInput" accept="application/pdf" multiple hidden />
+      </div>
+
+      <div class="doc-stats" id="docStats">未加载文档</div>
+      <ul id="docList" class="doc-list"></ul>
+
+      <button id="buildIndex" class="btn primary" disabled>建立索引</button>
+      <div class="progress hidden" id="progress"><div class="bar" id="progressBar"></div></div>
+    </section>
+
+    <!-- ── 右侧：对话 ── -->
+    <section class="panel chat">
+      <h2>💬 对话</h2>
+      <div id="messages" class="messages">
+        <div class="msg system">上传 PDF 并建立索引后，即可基于文档提问。</div>
+      </div>
+      <form id="chatForm" class="chat-form">
+        <textarea id="question" rows="2" placeholder="输入你的问题…（Enter 发送，Shift+Enter 换行）"></textarea>
+        <button type="submit" class="btn primary" id="askBtn">发送</button>
+      </form>
+    </section>
+  </main>
+
+  <footer class="footer">
+    本项目为开源示例。API Key 不会发送到除你配置的 API 地址以外的任何服务器。
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
