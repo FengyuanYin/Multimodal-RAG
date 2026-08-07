@@ -46,6 +46,23 @@ def build_orchestrator(settings_obj=None):
         except Exception as e:
             logger.warning(f"LLM 客户端初始化失败: {e}")
 
+    # 1.1 VLM 客户端（视觉语言模型，多模态检索/图片描述）
+    vlm_client = None
+    if getattr(cfg, "vlm_api_key", None):
+        try:
+            from openai import OpenAI
+            vlm_client = OpenAI(
+                api_key=cfg.vlm_api_key,
+                base_url=getattr(cfg, "vlm_base_url", None) or getattr(cfg, "llm_base_url", None),
+            )
+            logger.info(f"VLM 客户端初始化: {cfg.vlm_model}")
+        except Exception as e:
+            logger.warning(f"VLM 客户端初始化失败: {e}")
+    elif getattr(cfg, "llm_api_key", None):
+        # 未单独配置 VLM 时，回退使用 LLM 客户端（部分模型支持图像输入）
+        vlm_client = llm_client
+        logger.info(f"VLM 客户端回退使用 LLM 客户端: {cfg.llm_model}")
+
     # 2. 嵌入器
     embedder = None
     try:
@@ -106,6 +123,16 @@ def build_orchestrator(settings_obj=None):
         graph_store=graph_store,
         embedder=embedder,
     )
+    # 媒体资产注册表（RAG-Anything 风格：图片/表格数据 + 引用位置）
+    # 自动持久化到磁盘 + 内存上限（超出从磁盘懒加载），避免超大 PDF base64 全部驻留内存
+    from agentic_rag.memory.media_store import MediaRegistry
+    media_store = MediaRegistry(
+        persist_path=getattr(cfg, "media_store_path", "./data/media/media_registry.json"),
+        auto_save=True,
+        max_memory_bytes=getattr(cfg, "media_max_memory_mb", 512) * 1024 * 1024,
+    )
+    media_store.load()
+    hybrid_retriever.media_store = media_store
     # 从持久化文件重建 BM25 索引（服务重启 / 新进程时保留已摄入文档）
     try:
         hybrid_retriever.load_persisted_index()
@@ -131,6 +158,8 @@ def build_orchestrator(settings_obj=None):
         llm_client=llm_client,
         llm_model=cfg.llm_model,
         top_k_rerank=cfg.top_k_rerank,
+        vlm_client=vlm_client,
+        vlm_model=getattr(cfg, "vlm_model", None),
     )
 
     # 10. GraphRAG 引擎
@@ -155,6 +184,10 @@ def build_orchestrator(settings_obj=None):
         reranker=reranker,
         llm_client=llm_client,
         llm_model=cfg.llm_model,
+        vlm_client=vlm_client,
+        vlm_model=getattr(cfg, "vlm_model", None),
+        media_store=media_store,
+        enable_multimodal=getattr(cfg, "enable_multimodal_retrieval", False),
     )
 
     logger.info("所有组件初始化完成")

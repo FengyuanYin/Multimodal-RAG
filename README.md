@@ -151,6 +151,28 @@ Each document item looks like:
 
 The ingestion pipeline: **parse → chunk → embed → vector store → (optional) knowledge graph**.
 
+### Multi-modal retrieval via knowledge-graph references (RAG-Anything style)
+
+When ingesting documents (especially PDFs), the system:
+
+1. **Records reference positions** — detects `图1 / Figure 1 / 表2 / Table 2` mentions inside each chunk (`MediaRef` with `media_id`, `label`, `page`, `offset`).
+2. **Builds a media reference graph** — `chunk --references--> media` edges in the graph store (`NetworkX` / `Neo4j`), plus `media`/`chunk` nodes.
+3. **Stores media assets** — extracted page images / table text are kept in `MediaRegistry` (`media_store.py`).
+
+At query time, `enable_multimodal=True` (or config `AGR_ENABLE_MULTIMODAL_RETRIEVAL=true`) extends normal retrieval: matched chunks pull their referenced images/tables via the graph. Images are described by a **VLM** (vision-language model) before being passed to the LLM; tables are included as text.
+
+Configure a VLM via env vars (or `POST /api/v1/config/vlm`):
+
+```bash
+AGR_VLM_MODEL=gpt-4o            # e.g. gpt-4o / qwen-vl-max / glm-4v
+AGR_VLM_API_KEY=sk-...
+AGR_VLM_BASE_URL=               # OpenAI-compatible base URL
+```
+
+If the VLM is not configured, multi-modal retrieval still returns image/table references (without image descriptions). The Python package exposes `AgenticRAG.save_vlm_config(...)`, and the web app shows a modal reminder when a multimodal query hits images but no VLM is configured.
+
+**Media memory management** — extracted image base64 data is persisted to `AGR_MEDIA_STORE_PATH` (`./data/media/media_registry.json`) and only kept in memory up to `AGR_MEDIA_MAX_MEMORY_MB` (default 512 MB). When the limit is exceeded, older image payloads are unloaded from RAM and lazily reloaded from disk on demand, so very large PDFs won't exhaust memory.
+
 ---
 
 ## Advanced Usage
@@ -324,9 +346,10 @@ F:\intern\Agent\AgenticRag\
 │   │   ├── graph_rag.py       # GraphRAG engine
 │   │   └── hybrid_retriever.py# Hybrid retriever
 │   ├── memory/
-│   │   ├── multi_modal_parser.py  # Multi-modal parser
+│   │   ├── multi_modal_parser.py  # Multi-modal parser (text / image / table / PDF + media refs)
+│   │   ├── media_store.py         # Media asset registry (image base64 / table text)
 │   │   ├── vector_store.py    # Vector store
-│   │   └── graph_store.py     # Graph store
+│   │   └── graph_store.py     # Graph store (+ media reference graph)
 │   ├── processing/
 │   │   ├── embedders.py       # Embedders
 │   │   ├── reranker.py        # Re-ranker
@@ -384,6 +407,7 @@ agenticrag\Scripts\python.exe -m build --wheel --no-isolation
 - [x] Core architecture
 - [x] Hybrid routing
 - [x] Multi-modal parsing
+- [x] Multi-modal retrieval via knowledge-graph media references (RAG-Anything style) + VLM
 - [x] Advanced retrieval (query rewriting / hybrid retrieval / re-ranking)
 - [x] RESTful API
 - [x] Packaging (wheel / import and go)

@@ -161,7 +161,7 @@ result = rag.ingest([
 ], build_graph=True, chunk_size=512, chunk_overlap=128)
 
 print(result)
-# {'status': 'success', 'doc_count': 4, 'chunk_count': N, 'graph_stats': {...}, 'message': '...'}
+# {'status': 'success', 'doc_count': 4, 'chunk_count': N, 'media_count': M, 'reference_count': K, 'graph_stats': {...}, 'message': '...'}
 ```
 
 | 模态 | content 格式 | 解析方式 |
@@ -170,6 +170,28 @@ print(result)
 | `image` | base64 / 文件路径 | OCR + LLM 图像描述 |
 | `table` | CSV 文本 / PDF 字节 | Camelot / Tabula 解析 |
 | `pdf` | 文件路径 | Unstructured 深度解析（文本+表格+图片） |
+
+### 多模态检索（基于知识图谱的图片/表格引用，RAG-Anything 风格）
+
+摄入文档时，系统会：
+
+1. **记录引用位置**：检测每个分块中的「图1 / Figure 1 / 表2 / Table 2」引用（`MediaRef`：media_id、label、page、offset）。
+2. **构建媒体引用图**：在图存储中建立 `文本块 --references--> 图片/表格` 边（NetworkX / Neo4j）。
+3. **存储媒体资产**：抽取的页面图片 / 表格文本存入 `MediaRegistry`（`media_store.py`）。
+
+查询时启用 `enable_multimodal=True`（或环境变量 `AGR_ENABLE_MULTIMODAL_RETRIEVAL=true`），命中的文本块会通过引用图自动附带关联的图片/表格；图片由 **VLM（视觉语言模型）** 描述后交给 LLM，表格直接以文本进入上下文。
+
+VLM 配置（环境变量，或 `POST /api/v1/config/vlm` 在线保存）：
+
+```bash
+AGR_VLM_MODEL=gpt-4o            # 例如 gpt-4o / qwen-vl-max / glm-4v
+AGR_VLM_API_KEY=sk-...
+AGR_VLM_BASE_URL=               # OpenAI 兼容 Base URL
+```
+
+未配置 VLM 时，多模态检索仍会返回图片/表格引用（只是没有图片描述）。Python 包提供 `AgenticRAG.save_vlm_config(...)`；Web 版在多模态检索命中图片但未配置 VLM 时会弹窗提醒。
+
+**媒体内存管理** — 抽取的图片 base64 数据持久化到 `AGR_MEDIA_STORE_PATH`（`./data/media/media_registry.json`），内存中仅保留至 `AGR_MEDIA_MAX_MEMORY_MB`（默认 512 MB）上限。超出上限后，较早的图片数据会从内存卸载，按需从磁盘懒加载，避免超大 PDF 耗尽内存。
 
 ---
 
@@ -379,7 +401,7 @@ F:\intern\Agent\AgenticRag\
 │   ├── api/                   # models.py 请求/响应模型, routes.py API 路由
 │   ├── core/                  # orchestrator 编排器, hybrid_router 混合路由, query_rewriter 查询重写
 │   ├── rag/                   # standard_rag, graph_rag, hybrid_retriever
-│   ├── memory/                # multi_modal_parser, vector_store, graph_store
+│   ├── memory/                # multi_modal_parser, media_store, vector_store, graph_store
 │   ├── processing/            # chunker, embedders, reranker
 │   └── utils/                 # helpers
 └── tests/                     # test_router, test_retriever, test_api

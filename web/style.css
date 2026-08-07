@@ -960,6 +960,63 @@ select option { background: #121a33; color: var(--text); }
 ::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.14); border-radius: 999px; }
 ::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.25); }
 
+/* ── 多模态：引用中的媒体缩略图 ── */
+.msg .src .src-media {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 0 2px;
+}
+.msg .src .src-media-label {
+  font-size: 11px;
+  color: var(--accent);
+  font-weight: 600;
+}
+.msg .src .src-media-img {
+  max-width: 240px;
+  max-height: 180px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.04);
+  object-fit: contain;
+}
+.msg .src .src-media-table {
+  max-width: 100%;
+  white-space: pre-wrap;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  margin: 0;
+}
+
+/* ── VLM 未配置弹窗 ── */
+.modal-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(4px);
+  padding: 20px;
+}
+.modal-mask.hidden { display: none; }
+.modal-box {
+  max-width: 440px;
+  width: 100%;
+  padding: 22px 24px;
+  border-radius: 16px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+}
+.modal-box h3 { margin: 0 0 10px; font-size: 16px; }
+.modal-box p { margin: 0 0 18px; color: var(--text-dim); font-size: 13px; line-height: 1.6; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 10px; }
+
 /* ── 响应式 ── */
 @media (max-width: 860px) {
   .sidebar {

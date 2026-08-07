@@ -22,6 +22,7 @@ class QueryRequest:
     top_k: int = 5
     rerank: bool = True
     stream: bool = False
+    enable_multimodal: Optional[bool] = None  # None=使用系统配置
 
 
 @dataclass
@@ -60,6 +61,10 @@ class AgenticOrchestrator:
         reranker=None,
         llm_client=None,
         llm_model: str = "gpt-4o-mini",
+        vlm_client=None,
+        vlm_model: Optional[str] = None,
+        media_store=None,
+        enable_multimodal: bool = False,
     ):
         self.router = router
         self.query_rewriter = query_rewriter
@@ -69,6 +74,10 @@ class AgenticOrchestrator:
         self.reranker = reranker
         self.llm_client = llm_client
         self.llm_model = llm_model
+        self.vlm_client = vlm_client
+        self.vlm_model = vlm_model
+        self.media_store = media_store
+        self.enable_multimodal = enable_multimodal
 
         # 对话记忆
         self.conversations: Dict[str, List[dict]] = {}
@@ -102,12 +111,14 @@ class AgenticOrchestrator:
             logger.info(f"查询重写: strategy={rewritten.strategy}")
 
         # 4. 执行检索与生成
+        use_mm = request.enable_multimodal if request.enable_multimodal is not None else self.enable_multimodal
         result = self._execute_route(
             query=request.query,
             rewritten=rewritten,
             route=route_decision.route,
             top_k=request.top_k * 4,  # 初始检索更多
             use_rerank=request.rerank,
+            enable_multimodal=use_mm,
         )
 
         # 5. 答案验证与自我反思（可选）
@@ -164,6 +175,7 @@ class AgenticOrchestrator:
         route: str,
         top_k: int = 20,
         use_rerank: bool = True,
+        enable_multimodal: bool = False,
         attempted: Optional[set] = None,
     ) -> QueryResponse:
         """执行路由对应的检索与生成
@@ -175,11 +187,11 @@ class AgenticOrchestrator:
         attempted.add(route)
         try:
             if route == "standard":
-                return self._execute_standard(query, rewritten, top_k, use_rerank)
+                return self._execute_standard(query, rewritten, top_k, use_rerank, enable_multimodal)
             elif route == "graph":
                 return self._execute_graph(query, rewritten, top_k, use_rerank)
             else:  # hybrid
-                return self._execute_hybrid(query, rewritten, top_k, use_rerank)
+                return self._execute_hybrid(query, rewritten, top_k, use_rerank, enable_multimodal)
         except Exception as e:
             logger.error(f"{route} 路由执行失败: {e}")
             if self.router and getattr(self.router, 'enable_fallback', False):
@@ -192,7 +204,7 @@ class AgenticOrchestrator:
                         confidence=0.0,
                     )
                 logger.info(f"Fallback 到 {fallback_route}")
-                return self._execute_route(query, rewritten, fallback_route, top_k, use_rerank, attempted)
+                return self._execute_route(query, rewritten, fallback_route, top_k, use_rerank, enable_multimodal, attempted)
             return QueryResponse(
                 answer=f"处理查询时发生错误: {str(e)}",
                 route=route,
@@ -200,7 +212,8 @@ class AgenticOrchestrator:
             )
 
     def _execute_standard(self, query: str, rewritten: Optional[Any],
-                          top_k: int, use_rerank: bool) -> QueryResponse:
+                          top_k: int, use_rerank: bool,
+                          enable_multimodal: bool = False) -> QueryResponse:
         """执行标准 RAG"""
         if self.standard_rag:
             result = self.standard_rag.query(
@@ -208,13 +221,14 @@ class AgenticOrchestrator:
                 top_k=top_k,
                 use_rerank=use_rerank,
                 rewritten_query=rewritten,
+                enable_multimodal=enable_multimodal,
             )
             return QueryResponse(
                 answer=result.answer,
                 route="standard",
                 confidence=result.confidence,
                 sources=result.sources,
-                metadata={"latency_ms": result.latency_ms},
+                metadata={"latency_ms": result.latency_ms, **result.metadata},
             )
         return QueryResponse(answer="标准 RAG 引擎未配置", route="standard", confidence=0.0)
 
@@ -241,7 +255,8 @@ class AgenticOrchestrator:
         return QueryResponse(answer="GraphRAG 引擎未配置", route="graph", confidence=0.0)
 
     def _execute_hybrid(self, query: str, rewritten: Optional[Any],
-                        top_k: int, use_rerank: bool) -> QueryResponse:
+                        top_k: int, use_rerank: bool,
+                        enable_multimodal: bool = False) -> QueryResponse:
         """
         执行混合路由
 
@@ -261,6 +276,7 @@ class AgenticOrchestrator:
                     top_k=top_k,
                     use_rerank=use_rerank,
                     rewritten_query=rewritten,
+                    enable_multimodal=enable_multimodal,
                 )
             except Exception as e:
                 logger.warning(f"混合模式 - 标准 RAG 失败: {e}")

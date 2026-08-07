@@ -41,6 +41,8 @@ class StandardRAGEngine:
         llm_client=None,
         llm_model: str = "gpt-4o-mini",
         top_k_rerank: int = 5,
+        vlm_client=None,
+        vlm_model: Optional[str] = None,
     ):
         self.retriever = retriever
         self.reranker = reranker
@@ -48,6 +50,8 @@ class StandardRAGEngine:
         self.llm_client = llm_client
         self.llm_model = llm_model
         self.top_k_rerank = top_k_rerank
+        self.vlm_client = vlm_client
+        self.vlm_model = vlm_model
 
     def query(
         self,
@@ -56,6 +60,7 @@ class StandardRAGEngine:
         use_rerank: bool = True,
         system_prompt: Optional[str] = None,
         rewritten_query: Optional[Any] = None,
+        enable_multimodal: bool = False,
     ) -> RAGResult:
         """
         执行标准 RAG 查询
@@ -66,9 +71,10 @@ class StandardRAGEngine:
             use_rerank: 是否使用重排序
             system_prompt: 自定义系统提示
             rewritten_query: 重写后的查询（variants/sub_queries/hyde_answer 会参与扩展检索）
+            enable_multimodal: 是否启用多模态检索（通过引用图扩展图片/表格，RAG-Anything 风格）
 
         Returns:
-            RAGResult: 包含答案和来源
+            RAGResult: 包含答案和来源（启用多模态时 sources 会附加 media 项）
         """
         import time
         start_time = time.time()
@@ -115,29 +121,103 @@ class StandardRAGEngine:
             reranked = self.reranker.rerank(query_text, scored_docs, top_k=self.top_k_rerank)
             retrieved_docs = reranked
 
-        # 3. 构建上下文
+        # 2.5 多模态检索扩展：通过引用图找到关联图片/表格（RAG-Anything 风格）
+        media_items = []
+        if enable_multimodal and self.retriever and hasattr(self.retriever, "retrieve_media"):
+            try:
+                media_items = self.retriever.retrieve_media(retrieved_docs, include_data=True)
+            except Exception as e:
+                logger.warning(f"多模态媒体检索失败: {e}")
+
+        # 3. 构建上下文（含媒体：图片走 VLM 描述，表格直接文本）
         context = self._build_context(retrieved_docs)
+        media_context = self._build_media_context(media_items)
+        if media_context:
+            context = context + "\n\n" + media_context
 
         # 4. 生成答案
         answer = self._generate_answer(query_text, context, system_prompt)
 
         elapsed = (time.time() - start_time) * 1000
 
+        sources = [
+            {
+                "doc_id": d.doc_id,
+                "content": d.content[:200],
+                "score": d.score,
+                "modality": getattr(d, "modality", "text"),
+                "media_refs": getattr(d, "media_refs", []) or d.metadata.get("media_refs", []),
+            }
+            for d in retrieved_docs[:self.top_k_rerank]
+        ]
+        # 媒体资产作为独立来源项
+        for m in media_items[:self.top_k_rerank]:
+            sources.append({
+                "doc_id": m.get("doc_id", ""),
+                "content": (m.get("caption") or f"[{m.get('label', m.get('id'))} {m.get('type')}]")[:200],
+                "score": 1.0,
+                "modality": m.get("type", "image"),
+                "media": m,
+            })
+
         return RAGResult(
             answer=answer,
-            sources=[
-                {
-                    "doc_id": d.doc_id,
-                    "content": d.content[:200],
-                    "score": d.score,
-                    "modality": getattr(d, "modality", "text"),
-                }
-                for d in retrieved_docs[:self.top_k_rerank]
-            ],
+            sources=sources,
             route="standard",
             confidence=min(1.0, sum(d.score for d in retrieved_docs[:3]) / 3) if retrieved_docs else 0.0,
             latency_ms=elapsed,
+            metadata={"media_count": len(media_items)} if media_items else {},
         )
+
+    def _build_media_context(self, media_items: list) -> str:
+        """把关联媒体转换为 LLM 上下文：图片用 VLM 描述，表格直接给出文本表示"""
+        if not media_items:
+            return ""
+        parts = []
+        for i, m in enumerate(media_items[:8]):
+            mtype = m.get("type", "image")
+            label = m.get("label") or m.get("id", "")
+            page = m.get("page", 1)
+            if mtype == "image":
+                data = m.get("data")
+                if data and self.vlm_client:
+                    desc = self._describe_image_with_vlm(data)
+                    parts.append(f"[图片 {label}（第{page}页）]\n{desc}")
+                else:
+                    parts.append(f"[图片 {label}（第{page}页）]（未配置 VLM，无法生成描述；可查看引用片段）")
+            elif mtype == "table":
+                caption = m.get("caption") or m.get("data") or ""
+                parts.append(f"[表格 {label}（第{page}页）]\n{caption[:1000]}")
+            else:
+                parts.append(f"[{mtype} {label}（第{page}页）]")
+        return "【关联图片/表格】\n" + "\n\n".join(parts)
+
+    def _describe_image_with_vlm(self, data: str) -> str:
+        """调用 VLM 描述图片（data 为 base64）"""
+        try:
+            import base64 as _b64
+            # 兼容 data URL 与纯 base64
+            if data.startswith("data:"):
+                b64 = data.split(",", 1)[1]
+            else:
+                b64 = data
+            response = self.vlm_client.chat.completions.create(
+                model=self.vlm_model or self.llm_model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "请用中文简要描述这张图片的核心内容（3-5 句话），说明它可能用于回答什么问题。"},
+                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+                        ],
+                    }
+                ],
+                max_tokens=300,
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            logger.warning(f"VLM 描述图片失败: {e}")
+            return "（VLM 描述失败）"
 
     def _build_context(self, documents: list) -> str:
         """构建 LLM 上下文"""

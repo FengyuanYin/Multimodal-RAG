@@ -16,8 +16,11 @@
 - 📄 PDF 解析：pdf.js 在浏览器本地完成，支持多文件、分页
 - 🔍 本地 BM25 检索：中文 bigram 分词，无需任何模型即可用
 - 🧠 向量增强（可选）：配置 Embedding 模型后自动启用向量检索，并与 BM25 做 RRF 融合
+- 🖼 **多模态检索（可选）**：检测文档中的「图N / 表N」引用位置，命中文本时自动附带关联图片/表格；配置 **VLM** 后，图片会由视觉语言模型理解后参与回答（RAG-Anything 风格）
 - 💬 OpenAI 兼容 Chat Completions：适配 OpenAI / DeepSeek / OpenRouter / Groq / Moonshot 等
 - 🔐 密钥仅存 localStorage，绝不发送到第三方服务器
+
+> 多模态检索使用方式：在「设置」→ 检索模式中选择「多模态检索」，并在「VLM 配置」中填写 API Key 与模型（如 `gpt-4o` / `qwen-vl-max` / `glm-4v`）。未配置 VLM 时，检索仍会返回图片/表格引用，但不会生成图片描述，并会弹窗提醒。
 
 ---
 

@@ -19,6 +19,19 @@ class QueryRequest(BaseModel):
     top_k: int = Field(5, ge=1, le=50, description="返回结果数量")
     rerank: bool = Field(True, description="是否使用重排序")
     stream: bool = Field(False, description="是否流式输出")
+    enable_multimodal: Optional[bool] = Field(None, description="是否启用多模态检索（None=使用系统配置）")
+
+
+class MediaItem(BaseModel):
+    """媒体资产项（图片/表格）"""
+    id: str = Field("", description="媒体 ID")
+    doc_id: str = Field("", description="所属文档 ID")
+    type: str = Field("image", description="媒体类型：image | table")
+    page: int = Field(1, description="页码")
+    label: str = Field("", description="标签，如图1 / 表2")
+    caption: str = Field("", description="说明/文本表示")
+    refs: List[Dict[str, Any]] = Field(default_factory=list, description="引用位置列表")
+    data: Optional[str] = Field(None, description="图片 base64 或表格文本（可选）")
 
 
 class SourceItem(BaseModel):
@@ -27,6 +40,8 @@ class SourceItem(BaseModel):
     content: str = Field("", description="内容片段")
     score: float = Field(0.0, description="相关度分数")
     modality: str = Field("text", description="模态类型")
+    media_refs: List[Dict[str, Any]] = Field(default_factory=list, description="引用的图片/表格位置")
+    media: Optional[MediaItem] = Field(None, description="关联的媒体资产（图片/表格）")
 
 
 class QueryResponse(BaseModel):
@@ -63,6 +78,8 @@ class IngestResponse(BaseModel):
     status: str = Field("success", description="状态")
     doc_count: int = Field(0, description="文档数量")
     chunk_count: int = Field(0, description="分块数量")
+    media_count: int = Field(0, description="媒体资产数量（图片/表格）")
+    reference_count: int = Field(0, description="图/表引用数量")
     graph_stats: Optional[Dict[str, Any]] = Field(None, description="图构建统计")
     message: str = Field("", description="消息")
 
@@ -101,3 +118,30 @@ class CollectionListResponse(BaseModel):
     """集合列表响应"""
     collections: List[str] = Field(default_factory=list, description="集合列表")
     total: int = Field(0, description="总数")
+
+
+# ── VLM 配置（多模态检索） ──
+
+class VLMSettingsRequest(BaseModel):
+    """VLM 配置请求"""
+    provider: str = Field("openai", description="提供商：openai | litellm")
+    model: str = Field("", description="VLM 模型名，如 gpt-4o / qwen-vl-max")
+    api_key: Optional[str] = Field(None, description="API Key（留空则保持原值）")
+    base_url: Optional[str] = Field(None, description="Base URL（OpenAI 兼容）")
+
+
+class VLMSettingsResponse(BaseModel):
+    """VLM 配置响应（脱敏）"""
+    provider: str = Field("openai", description="提供商")
+    model: str = Field("", description="模型名")
+    base_url: str = Field("", description="Base URL")
+    configured: bool = Field(False, description="是否已配置")
+
+
+class ConfigResponse(BaseModel):
+    """系统配置状态"""
+    version: str = Field("", description="版本")
+    llm_configured: bool = Field(False, description="LLM 是否已配置")
+    vlm: VLMSettingsResponse = Field(default_factory=VLMSettingsResponse, description="VLM 配置状态")
+    enable_multimodal_retrieval: bool = Field(False, description="是否启用多模态检索")
+    media_count: int = Field(0, description="已注册媒体资产数量")

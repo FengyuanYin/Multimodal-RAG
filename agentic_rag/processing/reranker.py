@@ -19,6 +19,7 @@ class ScoredDocument:
     metadata: dict = field(default_factory=dict)
     modality: str = "text"
     source: str = "vector"  # vector | keyword | graph
+    media_refs: list = field(default_factory=list)  # 文本块对图片/表格的引用位置（RAG-Anything 风格）
 
 
 class BaseReranker:

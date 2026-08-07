@@ -79,6 +79,35 @@ class BaseGraphStore:
     def clear(self) -> bool:
         raise NotImplementedError
 
+    # ── 媒体引用图（RAG-Anything 风格：文本块 → 图片/表格） ──
+
+    def add_chunk_node(self, chunk_id: str, doc_id: str, content_preview: str = "") -> bool:
+        """添加文本块节点（type=chunk）"""
+        raise NotImplementedError
+
+    def add_media_node(self, media_id: str, media_type: str, doc_id: str = "",
+                       page: int = 1, label: str = "", caption: str = "",
+                       properties: Optional[dict] = None) -> bool:
+        """添加媒体节点（type=media，图片/表格）"""
+        raise NotImplementedError
+
+    def add_reference(self, chunk_id: str, media_id: str, label: str = "",
+                      page: int = 1, offset: int = 0, media_type: str = "image") -> bool:
+        """添加引用边：chunk --references--> media（记录引用位置）"""
+        raise NotImplementedError
+
+    def get_media_by_chunk(self, chunk_id: str) -> List[dict]:
+        """根据文本块 ID 返回其引用的媒体元数据列表（不含二进制数据）"""
+        raise NotImplementedError
+
+    def get_media_node(self, media_id: str) -> Optional[dict]:
+        """获取媒体节点元数据"""
+        raise NotImplementedError
+
+    def list_media(self) -> List[dict]:
+        """列出全部媒体节点元数据"""
+        raise NotImplementedError
+
 
 class NetworkXStore(BaseGraphStore):
     """NetworkX 内存图存储"""
@@ -251,6 +280,125 @@ class NetworkXStore(BaseGraphStore):
         self._init_graph()
         return True
 
+    # ── 媒体引用图（RAG-Anything 风格） ──
+
+    @staticmethod
+    def _chunk_node_id(chunk_id: str) -> str:
+        return f"chunk:{chunk_id}"
+
+    @staticmethod
+    def _media_node_id(media_id: str) -> str:
+        return f"media:{media_id}"
+
+    def add_chunk_node(self, chunk_id: str, doc_id: str, content_preview: str = "") -> bool:
+        node_id = self._chunk_node_id(chunk_id)
+        if not self._graph.has_node(node_id):
+            self._graph.add_node(
+                node_id,
+                name=chunk_id,
+                type="chunk",
+                properties={"doc_id": doc_id, "content_preview": content_preview[:200]},
+            )
+            return True
+        return False
+
+    def add_media_node(self, media_id: str, media_type: str, doc_id: str = "",
+                       page: int = 1, label: str = "", caption: str = "",
+                       properties: Optional[dict] = None) -> bool:
+        node_id = self._media_node_id(media_id)
+        if not self._graph.has_node(node_id):
+            self._graph.add_node(
+                node_id,
+                name=label or media_id,
+                type="media",
+                properties={
+                    "media_id": media_id,
+                    "media_type": media_type,
+                    "doc_id": doc_id,
+                    "page": page,
+                    "label": label,
+                    "caption": caption,
+                    **(properties or {}),
+                },
+            )
+            return True
+        return False
+
+    def add_reference(self, chunk_id: str, media_id: str, label: str = "",
+                      page: int = 1, offset: int = 0, media_type: str = "image") -> bool:
+        chunk_node = self._chunk_node_id(chunk_id)
+        media_node = self._media_node_id(media_id)
+        if not self._graph.has_node(chunk_node):
+            self._graph.add_node(chunk_node, name=chunk_id, type="chunk", properties={})
+        if not self._graph.has_node(media_node):
+            self._graph.add_node(media_node, name=media_id, type="media",
+                                 properties={"media_id": media_id, "media_type": media_type,
+                                             "page": page, "label": label})
+        self._graph.add_edge(
+            chunk_node,
+            media_node,
+            key=f"{chunk_node}->{media_node}_references",
+            relation_type="references",
+            properties={"label": label, "page": page, "offset": offset, "media_type": media_type},
+            weight=1.0,
+        )
+        return True
+
+    def get_media_by_chunk(self, chunk_id: str) -> List[dict]:
+        chunk_node = self._chunk_node_id(chunk_id)
+        if not self._graph.has_node(chunk_node):
+            return []
+        results = []
+        for media_node in self._graph.successors(chunk_node):
+            data = self._graph.nodes[media_node]
+            if data.get("type") != "media":
+                continue
+            edge_data = self._graph.get_edge_data(chunk_node, media_node)
+            ref_props = {}
+            if edge_data:
+                first_key = list(edge_data.keys())[0]
+                ref_props = edge_data[first_key].get("properties", {})
+            results.append({
+                "media_id": data.get("properties", {}).get("media_id", media_node),
+                "media_type": data.get("properties", {}).get("media_type", "image"),
+                "doc_id": data.get("properties", {}).get("doc_id", ""),
+                "page": data.get("properties", {}).get("page", 1),
+                "label": data.get("properties", {}).get("label", ""),
+                "caption": data.get("properties", {}).get("caption", ""),
+                "ref": ref_props,
+            })
+        return results
+
+    def get_media_node(self, media_id: str) -> Optional[dict]:
+        node_id = self._media_node_id(media_id)
+        if not self._graph.has_node(node_id):
+            return None
+        data = self._graph.nodes[node_id]
+        return {
+            "media_id": data.get("properties", {}).get("media_id", media_id),
+            "media_type": data.get("properties", {}).get("media_type", "image"),
+            "doc_id": data.get("properties", {}).get("doc_id", ""),
+            "page": data.get("properties", {}).get("page", 1),
+            "label": data.get("properties", {}).get("label", ""),
+            "caption": data.get("properties", {}).get("caption", ""),
+        }
+
+    def list_media(self) -> List[dict]:
+        results = []
+        for node_id, data in self._graph.nodes(data=True):
+            if data.get("type") != "media":
+                continue
+            props = data.get("properties", {})
+            results.append({
+                "media_id": props.get("media_id", node_id),
+                "media_type": props.get("media_type", "image"),
+                "doc_id": props.get("doc_id", ""),
+                "page": props.get("page", 1),
+                "label": props.get("label", ""),
+                "caption": props.get("caption", ""),
+            })
+        return results
+
     @property
     def stats(self) -> dict:
         import networkx as nx
@@ -390,6 +538,95 @@ class Neo4jStore(BaseGraphStore):
 
     def get_community_summary(self, community_id: str) -> Optional[str]:
         return None
+
+    # ── 媒体引用图（RAG-Anything 风格） ──
+
+    def add_chunk_node(self, chunk_id: str, doc_id: str, content_preview: str = "") -> bool:
+        query = """
+        MERGE (c:Chunk {id: $id})
+        SET c.doc_id = $doc_id, c.content_preview = $preview
+        RETURN c
+        """
+        self._run_query(query, {"id": chunk_id, "doc_id": doc_id, "preview": content_preview[:200]})
+        return True
+
+    def add_media_node(self, media_id: str, media_type: str, doc_id: str = "",
+                       page: int = 1, label: str = "", caption: str = "",
+                       properties: Optional[dict] = None) -> bool:
+        query = """
+        MERGE (m:Media {id: $id})
+        SET m.media_type = $media_type, m.doc_id = $doc_id, m.page = $page,
+            m.label = $label, m.caption = $caption, m.properties = $properties
+        RETURN m
+        """
+        self._run_query(query, {
+            "id": media_id, "media_type": media_type, "doc_id": doc_id,
+            "page": page, "label": label, "caption": caption, "properties": properties or {},
+        })
+        return True
+
+    def add_reference(self, chunk_id: str, media_id: str, label: str = "",
+                      page: int = 1, offset: int = 0, media_type: str = "image") -> bool:
+        query = """
+        MERGE (c:Chunk {id: $chunk_id})
+        MERGE (m:Media {id: $media_id})
+        MERGE (c)-[r:REFERENCES {media_type: $media_type}]->(m)
+        SET r.label = $label, r.page = $page, r.offset = $offset
+        RETURN r
+        """
+        self._run_query(query, {
+            "chunk_id": chunk_id, "media_id": media_id, "label": label,
+            "page": page, "offset": offset, "media_type": media_type,
+        })
+        return True
+
+    def get_media_by_chunk(self, chunk_id: str) -> List[dict]:
+        query = """
+        MATCH (c:Chunk {id: $chunk_id})-[r:REFERENCES]->(m:Media)
+        RETURN m, r
+        """
+        results = self._run_query(query, {"chunk_id": chunk_id})
+        return [{
+            "media_id": r["m"]["id"],
+            "media_type": r["m"].get("media_type", "image"),
+            "doc_id": r["m"].get("doc_id", ""),
+            "page": r["m"].get("page", 1),
+            "label": r["m"].get("label", ""),
+            "caption": r["m"].get("caption", ""),
+            "ref": {
+                "label": r["r"].get("label", ""),
+                "page": r["r"].get("page", 1),
+                "offset": r["r"].get("offset", 0),
+                "media_type": r["r"].get("media_type", "image"),
+            },
+        } for r in results]
+
+    def get_media_node(self, media_id: str) -> Optional[dict]:
+        query = "MATCH (m:Media {id: $id}) RETURN m"
+        results = self._run_query(query, {"id": media_id})
+        if not results:
+            return None
+        m = results[0]["m"]
+        return {
+            "media_id": m["id"],
+            "media_type": m.get("media_type", "image"),
+            "doc_id": m.get("doc_id", ""),
+            "page": m.get("page", 1),
+            "label": m.get("label", ""),
+            "caption": m.get("caption", ""),
+        }
+
+    def list_media(self) -> List[dict]:
+        query = "MATCH (m:Media) RETURN m"
+        results = self._run_query(query)
+        return [{
+            "media_id": r["m"]["id"],
+            "media_type": r["m"].get("media_type", "image"),
+            "doc_id": r["m"].get("doc_id", ""),
+            "page": r["m"].get("page", 1),
+            "label": r["m"].get("label", ""),
+            "caption": r["m"].get("caption", ""),
+        } for r in results]
 
     def clear(self) -> bool:
         self._run_query("MATCH (n) DETACH DELETE n")

@@ -31,7 +31,8 @@ from agentic_rag.rag.hybrid_retriever import HybridRetriever, BM25Retriever
 # 存储与解析
 from agentic_rag.memory.vector_store import VectorStoreFactory
 from agentic_rag.memory.graph_store import GraphStoreFactory
-from agentic_rag.memory.multi_modal_parser import MultiModalParser
+from agentic_rag.memory.multi_modal_parser import MultiModalParser, MediaAsset, MediaRef, ParsedDocument, DocumentChunk
+from agentic_rag.memory.media_store import MediaRegistry
 
 # 处理组件
 from agentic_rag.processing.embedders import EmbedderFactory
@@ -73,6 +74,11 @@ __all__ = [
     "VectorStoreFactory",
     "GraphStoreFactory",
     "MultiModalParser",
+    "MediaAsset",
+    "MediaRef",
+    "ParsedDocument",
+    "DocumentChunk",
+    "MediaRegistry",
     # 处理组件
     "EmbedderFactory",
     "RerankerFactory",

@@ -56,10 +56,12 @@ class BM25Retriever:
 
         scored = []
         for i, score in enumerate(scores):
-            # 注意：rank_bm25 在单文档语料 / 词出现在全部文档时 IDF 为负，
-            # 命中词的分数可能 ≤ 0，不能按 score > 0 过滤；0 才表示完全未命中
-            if score != 0:
-                doc = self._documents[i]
+            # rank_bm25 的 idf 在小语料下（如文档数=2、词出现在半数文档时）可能恰为 0，
+            # 不能用 score > 0 过滤，否则会漏掉真正命中的文档；
+            # 以「查询词是否出现在该文档」作为命中判据，score 仅用于排序。
+            doc = self._documents[i]
+            doc_terms = self._corpus[i]
+            if any(w in doc_terms for w in query_words):
                 scored.append(ScoredDocument(
                     doc_id=doc.doc_id,
                     content=doc.content,
@@ -67,6 +69,7 @@ class BM25Retriever:
                     metadata=doc.metadata,
                     modality=doc.modality,
                     source="keyword",
+                    media_refs=getattr(doc, "media_refs", []) or doc.metadata.get("media_refs", []),
                 ))
 
         scored.sort(key=lambda d: d.score, reverse=True)
@@ -132,6 +135,7 @@ class HybridRetriever:
                         score=1.0,
                         metadata=data.get("metadata", {}),
                         modality=data.get("modality", "text"),
+                        media_refs=data.get("media_refs", []) or data.get("metadata", {}).get("media_refs", []),
                     ))
         except Exception as e:
             logger.warning(f"加载持久化索引失败: {e}")
@@ -180,6 +184,7 @@ class HybridRetriever:
                         score=r.score,
                         metadata=r.payload,
                         source="vector",
+                        media_refs=r.payload.get("media_refs", []),
                     ))
                 logger.debug(f"向量检索: {len(vector_results)} 条结果")
             except Exception as e:
@@ -237,6 +242,92 @@ class HybridRetriever:
                     ))
 
         return results[:top_k]
+
+    # ── 多模态媒体检索（RAG-Anything 风格） ──
+
+    def retrieve_media(self, documents: List[ScoredDocument], include_data: bool = True) -> List[dict]:
+        """
+        根据检索命中的文本块，通过引用图找到关联的图片/表格资产。
+
+        Args:
+            documents: 检索命中的文档列表（ScoredDocument，含 media_refs）
+            include_data: 是否包含媒体二进制数据（图片 base64 / 表格文本）
+
+        Returns:
+            List[dict]: 去重后的媒体资产列表，每项含
+                {id, doc_id, type, page, label, caption, refs:[...], data?}
+        """
+        if not documents:
+            return []
+
+        media_ids: List[str] = []
+        ref_map: Dict[str, List[dict]] = {}
+        for doc in documents:
+            refs = getattr(doc, "media_refs", []) or doc.metadata.get("media_refs", [])
+            for ref in refs:
+                mid = ref.get("media_id") if isinstance(ref, dict) else getattr(ref, "media_id", "")
+                if not mid:
+                    continue
+                if mid not in ref_map:
+                    ref_map[mid] = []
+                ref_map[mid].append(ref)
+                media_ids.append(mid)
+
+        if not media_ids:
+            return []
+
+        # 1. 优先从媒体注册表取资产（含数据）
+        assets: Dict[str, dict] = {}
+        if getattr(self, "media_store", None):
+            for asset in self.media_store.get_many(media_ids):
+                assets[asset.id] = {
+                    "id": asset.id,
+                    "doc_id": asset.doc_id,
+                    "type": asset.type,
+                    "page": asset.page,
+                    "label": asset.label,
+                    "caption": asset.caption,
+                    "refs": ref_map.get(asset.id, []),
+                    "data": asset.data if include_data else None,
+                }
+
+        # 2. 未命中注册表的引用，从图存储补元数据（无二进制数据）
+        missing = [mid for mid in media_ids if mid not in assets]
+        if missing and self.graph_store:
+            try:
+                for mid in missing:
+                    node = self.graph_store.get_media_node(mid)
+                    if node:
+                        assets[mid] = {
+                            "id": mid,
+                            "doc_id": node.get("doc_id", ""),
+                            "type": node.get("media_type", "image"),
+                            "page": node.get("page", 1),
+                            "label": node.get("label", ""),
+                            "caption": node.get("caption", ""),
+                            "refs": ref_map.get(mid, []),
+                            "data": None,
+                        }
+            except Exception as e:
+                logger.warning(f"从图存储补媒体元数据失败: {e}")
+
+        # 3. 仍缺失的引用（如无匹配资产）也返回占位信息，便于前端提示
+        for mid in media_ids:
+            if mid not in assets:
+                assets[mid] = {
+                    "id": mid,
+                    "doc_id": "",
+                    "type": "image",
+                    "page": 1,
+                    "label": "",
+                    "caption": "",
+                    "refs": ref_map.get(mid, []),
+                    "data": None,
+                }
+
+        ordered = [assets[mid] for mid in dict.fromkeys(media_ids)]
+        logger.info(f"媒体检索: {len(ordered)} 个关联图片/表格")
+        return ordered
 
     def _reciprocal_rank_fusion(
         self,

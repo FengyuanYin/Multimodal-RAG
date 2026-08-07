@@ -6,6 +6,7 @@
 
 from pydantic_settings import BaseSettings
 from typing import Optional
+from loguru import logger
 
 
 class Settings(BaseSettings):
@@ -49,6 +50,20 @@ class Settings(BaseSettings):
     llm_temperature: float = 0.1
     llm_max_tokens: int = 4096
 
+    # ── VLM（视觉语言模型，多模态检索/图问答） ──
+    vlm_provider: str = "openai"  # openai | litellm
+    vlm_model: str = "gpt-4o-mini"
+    vlm_api_key: Optional[str] = None
+    vlm_base_url: Optional[str] = None
+
+    # ── 多模态检索 ──
+    # 基于知识图谱的"文本块 → 图片/表格"引用检索（RAG-Anything 风格）
+    enable_multimodal_retrieval: bool = True
+    # 媒体资产注册表持久化路径（图片 base64 / 表格文本）
+    media_store_path: str = "./data/media/media_registry.json"
+    # 媒体 base64 数据内存上限（MB），超出部分从磁盘懒加载
+    media_max_memory_mb: int = 512
+
     # ── 检索参数 ──
     top_k_initial: int = 20
     top_k_rerank: int = 5
@@ -64,6 +79,60 @@ class Settings(BaseSettings):
     log_file: Optional[str] = "./data/logs/app.log"
 
     model_config = {"env_prefix": "AGR_", "env_file": ".env", "extra": "ignore"}
+
+    # ── VLM 配置状态（供 API/客户端判断） ──
+
+    @property
+    def vlm_configured(self) -> bool:
+        """是否已配置可用的 VLM（模型名 + API Key）"""
+        return bool(self.vlm_model and self.vlm_api_key)
+
+    def is_vlm_configured(self) -> bool:
+        return self.vlm_configured
+
+    def vlm_config_dict(self, include_secret: bool = False) -> dict:
+        """VLM 配置（脱敏）"""
+        d = {
+            "provider": self.vlm_provider,
+            "model": self.vlm_model,
+            "base_url": self.vlm_base_url or "",
+            "configured": self.vlm_configured,
+        }
+        if include_secret:
+            d["api_key"] = self.vlm_api_key or ""
+        return d
+
+    def save_vlm_config(self, provider: Optional[str] = None, model: Optional[str] = None,
+                        api_key: Optional[str] = None, base_url: Optional[str] = None,
+                        env_path: str = ".env") -> dict:
+        """保存 VLM 配置：更新内存对象并写入 .env（重启后仍生效）"""
+        if provider is not None:
+            self.vlm_provider = provider or "openai"
+        if model is not None:
+            self.vlm_model = (model or "").strip()
+        if api_key is not None:
+            self.vlm_api_key = (api_key or "").strip() or None
+        if base_url is not None:
+            self.vlm_base_url = (base_url or "").strip() or None
+
+        # 写入 .env（追加/更新 AGR_VLM_* 行）
+        import os
+        lines = []
+        if os.path.exists(env_path):
+            with open(env_path, encoding="utf-8") as f:
+                lines = f.read().splitlines()
+        updates = {
+            "AGR_VLM_PROVIDER": self.vlm_provider,
+            "AGR_VLM_MODEL": self.vlm_model,
+            "AGR_VLM_API_KEY": self.vlm_api_key or "",
+            "AGR_VLM_BASE_URL": self.vlm_base_url or "",
+        }
+        kept = [ln for ln in lines if not any(ln.strip().startswith(k + "=") for k in updates)]
+        kept.extend(f"{k}={v}" for k, v in updates.items())
+        with open(env_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(kept) + "\n")
+        logger.info("VLM 配置已保存到 .env")
+        return self.vlm_config_dict(include_secret=False)
 
 
 settings = Settings()

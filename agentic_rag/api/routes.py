@@ -9,10 +9,11 @@ from fastapi import APIRouter, HTTPException, Depends, Header
 from loguru import logger
 
 from agentic_rag.api.models import (
-    QueryRequest, QueryResponse, SourceItem,
+    QueryRequest, QueryResponse, SourceItem, MediaItem,
     IngestRequest, IngestResponse,
     FeedbackRequest, FeedbackResponse,
     HealthResponse, CollectionListResponse,
+    VLMSettingsRequest, VLMSettingsResponse, ConfigResponse,
 )
 from agentic_rag.core.orchestrator import AgenticOrchestrator, QueryRequest as OrchestratorRequest
 from agentic_rag.state import get_orchestrator
@@ -66,6 +67,7 @@ async def query(request: QueryRequest, _=Depends(verify_api_key)):
         top_k=request.top_k,
         rerank=request.rerank,
         stream=request.stream,
+        enable_multimodal=request.enable_multimodal,
     )
 
     # 执行查询
@@ -82,6 +84,8 @@ async def query(request: QueryRequest, _=Depends(verify_api_key)):
                 content=s.get("content", "")[:500],
                 score=s.get("score", 0.0),
                 modality=s.get("modality", "text"),
+                media_refs=s.get("media_refs", []),
+                media=MediaItem(**s["media"]) if s.get("media") else None,
             )
             for s in (result.sources or [])
         ],
@@ -122,6 +126,8 @@ async def ingest(request: IngestRequest, _=Depends(verify_api_key)):
         status=result["status"],
         doc_count=result["doc_count"],
         chunk_count=result["chunk_count"],
+        media_count=result.get("media_count", 0),
+        reference_count=result.get("reference_count", 0),
         graph_stats=result["graph_stats"],
         message=result["message"],
     )
@@ -165,3 +171,77 @@ async def delete_collection(name: str, _=Depends(verify_api_key)):
             raise HTTPException(status_code=500, detail=f"集合 {name} 删除失败")
         return {"status": "success", "message": f"集合 {name} 已删除"}
     raise HTTPException(status_code=404, detail="集合不存在")
+
+
+# ── VLM 配置与系统配置状态 ──
+
+@router.get("/config", response_model=ConfigResponse, tags=["配置"])
+async def get_config(_=Depends(verify_api_key)):
+    """获取系统配置状态（LLM/VLM/多模态检索开关）"""
+    from agentic_rag.config import settings
+    orch = get_orchestrator()
+    media_count = 0
+    if orch and getattr(orch, "media_store", None):
+        media_count = orch.media_store.count
+    vlm = settings.vlm_config_dict()
+    return ConfigResponse(
+        version=settings.app_version,
+        llm_configured=bool(settings.llm_api_key),
+        vlm=VLMSettingsResponse(
+            provider=vlm["provider"],
+            model=vlm["model"],
+            base_url=vlm["base_url"],
+            configured=vlm["configured"],
+        ),
+        enable_multimodal_retrieval=bool(getattr(orch, "enable_multimodal", False) if orch else settings.enable_multimodal_retrieval),
+        media_count=media_count,
+    )
+
+
+@router.get("/config/vlm", response_model=VLMSettingsResponse, tags=["配置"])
+async def get_vlm_config(_=Depends(verify_api_key)):
+    """获取 VLM 配置（脱敏）"""
+    from agentic_rag.config import settings
+    vlm = settings.vlm_config_dict()
+    return VLMSettingsResponse(
+        provider=vlm["provider"],
+        model=vlm["model"],
+        base_url=vlm["base_url"],
+        configured=vlm["configured"],
+    )
+
+
+@router.post("/config/vlm", response_model=VLMSettingsResponse, tags=["配置"])
+async def save_vlm_config(request: VLMSettingsRequest, _=Depends(verify_api_key)):
+    """保存 VLM 配置（写入 .env，重启后仍生效；同时尝试热更新当前编排器）"""
+    from agentic_rag.config import settings
+    result = settings.save_vlm_config(
+        provider=request.provider or None,
+        model=request.model or None,
+        api_key=request.api_key,
+        base_url=request.base_url,
+    )
+
+    # 热更新：尝试重建 VLM 客户端并挂到编排器/标准 RAG 引擎
+    orch = get_orchestrator()
+    if orch is not None:
+        try:
+            vlm_client = None
+            if settings.vlm_api_key:
+                from openai import OpenAI
+                vlm_client = OpenAI(
+                    api_key=settings.vlm_api_key,
+                    base_url=settings.vlm_base_url or settings.llm_base_url,
+                )
+            elif settings.llm_api_key:
+                vlm_client = orch.llm_client
+            orch.vlm_client = vlm_client
+            orch.vlm_model = settings.vlm_model
+            if orch.standard_rag:
+                orch.standard_rag.vlm_client = vlm_client
+                orch.standard_rag.vlm_model = settings.vlm_model
+            logger.info("VLM 客户端已热更新")
+        except Exception as e:
+            logger.warning(f"VLM 客户端热更新失败（重启后生效）: {e}")
+
+    return VLMSettingsResponse(**result)

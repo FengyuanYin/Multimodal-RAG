@@ -169,14 +169,16 @@ const MemStore = {
 
 /* ───────────────────────── 状态 ───────────────────────── */
 const State = {
-  // 文档列表：[{ id, name, cat, pages: [{page, text}], parser, addedAt }]
+  // 文档列表：[{ id, name, cat, pages: [{page, text}], media: [{id,type,label,page,dataUrl,caption}], parser, addedAt }]
   docs: [],
-  // 分块结果：[{ id, docId, file, page, text, tokens }]
+  // 分块结果：[{ id, docId, file, page, text, tokens, refs }]
   chunks: [],
   // BM25 数据结构
   bm25: null,
   // 可选向量数据：{ vectors: Float32Array, norm: Float32Array, dim: number }
   vectors: null,
+  // 媒体资产（图片/表格，多模态检索用）：[{ id, docId, file, page, label, type, num, dataUrl, caption }]
+  media: [],
   // 会话列表：[{ id, title, messages: [{role, content, ts}], createdAt, updatedAt }]
   convs: [],
   // 当前会话 ID
@@ -184,6 +186,66 @@ const State = {
   // 长期记忆条目：[{ id, type, content, ts }]
   memories: [],
 };
+
+/* ───────────────────────── 图/表引用检测（RAG-Anything 风格） ───────────────────────── */
+// 匹配 "图1" / "图 1" / "Figure 1" / "Fig. 1" / "表2" / "表 2" / "Table 2"
+function detectMediaRefsInText(text) {
+  const refs = [];
+  const re = /(?:图\s*|Figure\s+|Fig\.?\s*)(\d{1,3})|(?:表\s*|表格\s*|Table\s+)(\d{1,3})/gi;
+  let m;
+  while ((m = re.exec(text))) {
+    let type, num;
+    if (m[1] !== undefined) {
+      type = "image";
+      num = m[1];
+    } else {
+      type = "table";
+      num = m[2];
+    }
+    refs.push({
+      label: type === "image" ? `图${num}` : `表${num}`,
+      type,
+      num,
+      offset: m.index,
+    });
+  }
+  return refs;
+}
+
+// 渲染 PDF 页面为图片（用于展示/交给 VLM 理解）
+async function renderPageToDataUrl(page, scale) {
+  const viewport = page.getViewport({ scale: scale || 1.5 });
+  const canvas = document.createElement("canvas");
+  canvas.width = viewport.width;
+  canvas.height = viewport.height;
+  const ctx = canvas.getContext("2d");
+  await page.render({ canvasContext: ctx, viewport }).promise;
+  return canvas.toDataURL("image/jpeg", 0.7);
+}
+
+// 从检索命中的分块收集关联媒体（按 文档+类型+编号 匹配）
+function collectMediaForChunks(chunks, mediaList) {
+  const out = [];
+  const seen = new Set();
+  for (const c of chunks || []) {
+    for (const ref of c.refs || []) {
+      const key = `${c.docId}_${ref.type}_${ref.num}_${c.page}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      // num 可能为字符串（正则捕获）或数字（自增计数），统一 String 比较
+      let found = mediaList.find(
+        (m) => m.docId === c.docId && m.type === ref.type && String(m.num) === String(ref.num) && m.page === c.page
+      );
+      if (!found) {
+        found = mediaList.find(
+          (m) => m.docId === c.docId && m.type === ref.type && String(m.num) === String(ref.num)
+        );
+      }
+      if (found) out.push({ ...found, ref });
+    }
+  }
+  return out;
+}
 
 /* ───────────────────────── 分词（中文 bigram + 英文单词） ───────────────────────── */
 function tokenize(text) {
@@ -352,6 +414,7 @@ const Parsers = {
       const buf = await file.arrayBuffer();
       const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
       const pages = [];
+      const media = [];
       for (let p = 1; p <= pdf.numPages; p++) {
         const page = await pdf.getPage(p);
         const content = await page.getTextContent();
@@ -364,8 +427,29 @@ const Parsers = {
         }
         const text = [...lines.values()].join("\n");
         if (text.trim()) pages.push({ page: p, text });
+
+        // 渲染页面图像（供引用展示 / VLM 理解）
+        let dataUrl = "";
+        try {
+          dataUrl = await renderPageToDataUrl(page, 1.5);
+        } catch (e) {
+          /* 渲染失败则跳过页面图像 */
+        }
+        // 检测页文本中的「图N / 表N」引用，记录引用位置并建立媒体资产
+        for (const ref of detectMediaRefsInText(text)) {
+          media.push({
+            id: `${ref.type}_${ref.num}_p${p}`,
+            file: file.name,
+            page: p,
+            label: ref.label,
+            type: ref.type,
+            num: ref.num,
+            dataUrl,
+            caption: text.slice(0, 400),
+          });
+        }
       }
-      return pages;
+      return { pages, media };
     },
   },
   mineru: {
@@ -378,6 +462,77 @@ const Parsers = {
     },
   },
 };
+
+/* MinerU 解析：从 markdown 文本中抽取图片与表格媒体资产（多模态检索用） */
+function parseMediaFromMarkdown(markdown, page) {
+  const media = [];
+  let imgSeq = 0;
+  let tableSeq = 0;
+
+  // 图片：![label](url) —— url 可为 base64(data:image/...) 或 http(s) 链接
+  const imgRe = /!\[([^\]]*)\]\(([^)]+)\)/g;
+  let m;
+  while ((m = imgRe.exec(markdown || ""))) {
+    const labelRaw = (m[1] || "").trim();
+    const url = (m[2] || "").trim();
+    let type = "image";
+    let num;
+    let label;
+    const numMatch = labelRaw.match(/^(?:图|Figure|Fig\.?)\s*(\d{1,3})$/i);
+    if (numMatch) {
+      num = numMatch[1];
+      label = `图${num}`;
+    } else {
+      imgSeq++;
+      num = imgSeq;
+      label = `图${imgSeq}`;
+    }
+    let dataUrl = "";
+    let urlOnly = "";
+    if (/^data:image\//i.test(url)) dataUrl = url;
+    else if (/^https?:\/\//i.test(url)) urlOnly = url;
+    else continue; // 忽略相对路径等无法直接引用的图片
+    media.push({
+      id: `image_${num}_p${page}`,
+      page,
+      label,
+      type,
+      num,
+      dataUrl,
+      url: urlOnly,
+      caption: labelRaw,
+    });
+  }
+
+  // 表格：连续以 | 开头的 markdown 表格行
+  const lines = (markdown || "").split("\n");
+  let i = 0;
+  while (i < lines.length) {
+    if (lines[i].trim().startsWith("|") && lines[i].includes("|")) {
+      const rows = [];
+      while (i < lines.length && lines[i].trim().startsWith("|") && lines[i].includes("|")) {
+        rows.push(lines[i].trim());
+        i++;
+      }
+      if (rows.length >= 2) {
+        tableSeq++;
+        media.push({
+          id: `table_${tableSeq}_p${page}`,
+          page,
+          label: `表${tableSeq}`,
+          type: "table",
+          num: tableSeq,
+          dataUrl: "",
+          url: "",
+          caption: rows.join("\n"),
+        });
+      }
+    } else {
+      i++;
+    }
+  }
+  return media;
+}
 
 /* MinerU 自托管：POST /file2text */
 async function mineruSelfhostParse(file, settings) {
@@ -394,14 +549,18 @@ async function mineruSelfhostParse(file, settings) {
   // 兼容两种返回格式：
   //   1) { text: "整篇文本" }
   //   2) { pages: [{ page: 1, text: "..." }] }
+  // 返回 { pages, media }，media 从 markdown 中抽取图片/表格
   if (Array.isArray(data.pages) && data.pages.length) {
-    return data.pages.map((p) => ({
+    const pages = data.pages.map((p) => ({
       page: p.page || 1,
       text: p.text || p.content || "",
     })).filter((p) => p.text.trim());
+    const media = pages.flatMap((p) => parseMediaFromMarkdown(p.text, p.page));
+    return { pages, media };
   }
   if (typeof data.text === "string" && data.text.trim()) {
-    return [{ page: 1, text: data.text }];
+    const pages = [{ page: 1, text: data.text }];
+    return { pages, media: parseMediaFromMarkdown(data.text, 1) };
   }
   throw new Error("MinerU 返回格式无法识别（期望 {text} 或 {pages:[{page,text}]}）");
 }
@@ -465,16 +624,31 @@ async function mineruOfficialParse(file, settings) {
   const result = await mineruFetch(`/extract/result/${taskId}`, settings, { method: "GET" });
   const extractResult = (result.data && result.data.extract_result) || [];
   const contents = (extractResult[0] && extractResult[0].extract_content) || [];
-  const pages = contents
-    .map((c) => ({
-      page: (c.page_idx || 0) + 1,
-      text: c.content || c.markdown || "",
-    }))
-    .filter((p) => p.text.trim());
+
+  // 逐项处理：文本/markdown 累积，图片项转成 ![label](url) 语法，统一交给 parseMediaFromMarkdown
+  const pages = [];
+  const markdownParts = [];
+  let imgSeq = 0;
+  for (const c of contents) {
+    const pageIdx = (c.page_idx || 0) + 1;
+    const text = c.content || c.markdown || "";
+    const imgUrl = c.img_url || c.image_url || "";
+    if (imgUrl && (/^data:image\//i.test(imgUrl) || /^https?:\/\//i.test(imgUrl))) {
+      imgSeq++;
+      markdownParts.push({ pageIdx, text: `${text ? text + "\n" : ""}![图${imgSeq}](${imgUrl})` });
+    } else if (text && text.trim()) {
+      markdownParts.push({ pageIdx, text });
+    }
+  }
+  const media = [];
+  for (const { pageIdx, text } of markdownParts) {
+    media.push(...parseMediaFromMarkdown(text, pageIdx));
+    pages.push({ page: pageIdx, text });
+  }
   if (!pages.length) {
     throw new Error("MinerU 未返回可用的解析文本");
   }
-  return pages;
+  return { pages, media };
 }
 
 /* ───────────────────────── 分块 ───────────────────────── */
@@ -496,6 +670,12 @@ function buildChunks(docs, chunkSize) {
       for (const part of splitChunks(p.text, chunkSize, overlap)) {
         const text = part.trim();
         if (!text) continue;
+        // 记录本分块内对「图N / 表N」的引用位置（RAG-Anything 风格）
+        const refs = detectMediaRefsInText(text).map((r) => ({
+          ...r,
+          page: p.page,
+          docId: doc.id,
+        }));
         chunks.push({
           id: `c${seq++}`,
           docId: doc.id,
@@ -504,6 +684,7 @@ function buildChunks(docs, chunkSize) {
           page: p.page,
           text,
           tokens: tokenize(text),
+          refs,
         });
       }
     }
@@ -558,6 +739,61 @@ async function askLLM(settings, systemPrompt, userContent, history) {
   return (msg && msg.content) || "";
 }
 
+/* ───────────────────────── VLM 多模态理解（图片/表格） ───────────────────────── */
+async function askVLM(settings, imageMedia) {
+  // OpenAI 兼容多模态输入：content 为 text + image_url 数组
+  const content = [
+    {
+      type: "text",
+      text:
+        "以下是文档中与用户问题相关的图片（可能包含整页截图）。请用中文逐张简要描述核心内容（每张 1-3 句），" +
+        "说明图片里有哪些关键信息（文字、数据、图表、表格等），以及它们可能用于回答什么问题。",
+    },
+    ...imageMedia.map((m) => ({
+      type: "image_url",
+      image_url: { url: m.dataUrl || m.url },
+    })),
+  ];
+  const resp = await fetch(apiUrl("/chat/completions", settings), {
+    method: "POST",
+    headers: apiHeaders(settings),
+    body: JSON.stringify(
+      apiBody(
+        {
+          model: settings.vlmModel || settings.model,
+          messages: [{ role: "user", content }],
+          temperature: 0.2,
+          max_tokens: 800,
+        },
+        settings
+      )
+    ),
+  });
+  if (!resp.ok) {
+    const err = await resp.text().catch(() => "");
+    throw new Error(`VLM API ${resp.status}: ${err.slice(0, 300)}`);
+  }
+  const data = await resp.json();
+  const choice = data.choices && data.choices[0];
+  const msg = choice && choice.message;
+  return (msg && msg.content) || "";
+}
+
+/* ───────────────────────── VLM 未配置弹窗提醒 ───────────────────────── */
+let vlmModalShown = false;
+function showVlmModal(msg) {
+  if (vlmModalShown) return;
+  vlmModalShown = true;
+  const box = $("vlmModal");
+  if (!box) return;
+  if (msg) $("vlmModalMsg").textContent = msg;
+  box.classList.remove("hidden");
+}
+function closeVlmModal() {
+  const box = $("vlmModal");
+  if (box) box.classList.add("hidden");
+}
+
 /* ───────────────────────── 设置表单 ───────────────────────── */
 function loadSettingsIntoForm() {
   const s = Settings.load();
@@ -573,11 +809,16 @@ function loadSettingsIntoForm() {
   $("mineruMode").value = s.mineruMode || "official";
   $("mineruApiKey").value = s.mineruApiKey || "";
   $("mineruUrl").value = s.mineruUrl || "";
+  // VLM 配置（多模态检索）
+  $("vlmApiKey").value = s.vlmApiKey || "";
+  $("vlmBaseUrl").value = s.vlmBaseUrl || "";
+  $("vlmModel").value = s.vlmModel || "";
   $("enableMemory").checked = s.enableMemory !== false;
   $("memoryRounds").value = s.memoryRounds || 10;
   syncParserUI();
   syncModelTag();
   syncRetrievalStat();
+  syncVlmStat();
 }
 
 function collectSettings() {
@@ -594,6 +835,9 @@ function collectSettings() {
     mineruMode: $("mineruMode").value,
     mineruApiKey: $("mineruApiKey").value.trim(),
     mineruUrl: $("mineruUrl").value.trim().replace(/\/+$/, ""),
+    vlmApiKey: $("vlmApiKey").value.trim(),
+    vlmBaseUrl: $("vlmBaseUrl").value.trim().replace(/\/+$/, ""),
+    vlmModel: $("vlmModel").value.trim(),
     enableMemory: $("enableMemory").checked,
     memoryRounds: parseInt($("memoryRounds").value, 10) || 10,
   };
@@ -629,13 +873,29 @@ function syncModelTag() {
 
 function syncRetrievalStat() {
   const s = Settings.load();
-  const modeMap = { keyword: "关键词检索", vector: "向量检索", hybrid: "混合检索（关键词 + 向量）" };
+  const modeMap = {
+    keyword: "关键词检索",
+    vector: "向量检索",
+    hybrid: "混合检索（关键词 + 向量）",
+    multimodal: "多模态检索（文本 + 图片/表格引用 + VLM）",
+  };
   const mode = modeMap[s.retrievalMode] || "关键词检索";
   const parts = [s.parser === "mineru" ? "MinerU 解析" : "本地解析", mode];
   if ((s.retrievalMode === "vector" || s.retrievalMode === "hybrid") && !s.embedModel) {
     parts.push("⚠️ 未配置 Embedding 模型，将自动降级为关键词检索");
   }
+  if (s.retrievalMode === "multimodal" && !(s.vlmApiKey && s.vlmModel)) {
+    parts.push("⚠️ 未配置 VLM，图片将仅展示引用");
+  }
   $("retrievalStat").textContent = parts.join(" · ");
+}
+
+function syncVlmStat() {
+  const s = Settings.load();
+  const stat = $("vlmStat");
+  if (!stat) return;
+  const ok = s.vlmApiKey && s.vlmModel;
+  stat.textContent = ok ? `✅ 已配置 · ${s.vlmModel}` : "⚠️ 未配置（多模态图片将无 VLM 描述）";
 }
 
 /* ───────────────────────── 视图切换（侧边栏） ───────────────────────── */
@@ -756,7 +1016,7 @@ function renderDocList() {
     li.appendChild(del);
     list.appendChild(li);
   }
-  $("docStats").textContent = `共 ${State.docs.length} 个文档 / ${State.docs.reduce((s, d) => s + (d.pages ? d.pages.length : 0), 0)} 页`;
+  $("docStats").textContent = `共 ${State.docs.length} 个文档 / ${State.docs.reduce((s, d) => s + (d.pages ? d.pages.length : 0), 0)} 页 / ${State.docs.reduce((s, d) => s + ((d.media && d.media.length) || 0), 0)} 处图/表引用`;
   $("docBadge").textContent = String(State.docs.length);
   $("buildIndex").disabled = State.docs.length === 0;
 }
@@ -766,6 +1026,7 @@ function invalidateIndex() {
     State.chunks = [];
     State.bm25 = null;
     State.vectors = null;
+    State.media = [];
     addMessage("system", "文档或分类已变化，请重新建立索引。");
   }
 }
@@ -789,11 +1050,15 @@ async function handleFiles(files) {
   for (const file of files) {
     addMessage("system", `正在解析：${file.name}（${parser.name}）…`);
     try {
-      const pages = await parser.parse(file, settings);
+      const parsed = await parser.parse(file, settings);
+      // 兼容两种返回：数组（旧逻辑，仅 pages）或 { pages, media }
+      const pages = Array.isArray(parsed) ? parsed : parsed.pages;
+      const parsedMedia = (!Array.isArray(parsed) && parsed.media) || [];
       if (!pages.length) {
         addMessage("error", `解析 ${file.name} 未提取到文本内容。`);
         continue;
-      }      const doc = {
+      }
+      const doc = {
         id: uid("doc"),
         name: file.name,
         cat: targetCat,
@@ -801,9 +1066,16 @@ async function handleFiles(files) {
         parser: settings.parser,
         addedAt: Date.now(),
       };
+      // 媒体资产补全 docId 前缀，便于多模态检索时按文档定位
+      doc.media = parsedMedia.map((m) => ({
+        ...m,
+        id: `${doc.id}_${m.id}`,
+        docId: doc.id,
+      }));
       State.docs.push(doc);
       Store.saveDocs(State.docs);
-      addMessage("system", `已添加 ${file.name}：${pages.length} 页${targetCat ? `（分类：${catName(targetCat)}）` : ""}。`);
+      const mediaTip = doc.media.length ? `，检测到 ${doc.media.length} 处图/表引用` : "";
+      addMessage("system", `已添加 ${file.name}：${pages.length} 页${targetCat ? `（分类：${catName(targetCat)}）` : ""}${mediaTip}。`);
     } catch (e) {
       addMessage("error", `解析 ${file.name} 失败：${e.message}`);
     }
@@ -1456,6 +1728,17 @@ async function handleBuildIndex() {
     State.vectors = null;
     setProgress(50);
 
+    // 多模态检索：汇总媒体引用图谱（文本块 → 图片/表格引用位置）
+    const wantMultimodal = settings.retrievalMode === "multimodal";
+    if (wantMultimodal) {
+      State.media = State.docs.flatMap((d) => d.media || []);
+      addMessage(
+        "system",
+        `已建立媒体引用图谱：${State.media.length} 个图片/表格引用` +
+          (settings.vlmApiKey && settings.vlmModel ? "（VLM 已配置）" : "（未配置 VLM，图片将仅展示引用）")
+      );
+    }
+
     const wantVector = settings.retrievalMode === "vector" || settings.retrievalMode === "hybrid";
     if (wantVector) {
       if (!settings.embedModel || !settings.apiKey) {
@@ -1470,6 +1753,7 @@ async function handleBuildIndex() {
       "system",
       `索引完成：${State.chunks.length} 个分块` +
         (State.vectors ? "（含向量检索）" : "（关键词 BM25 检索）") +
+        (wantMultimodal ? `，含 ${State.media.length} 个图片/表格引用` : "") +
         "。可以开始提问。"
     );
   } catch (e) {
@@ -1571,6 +1855,44 @@ async function handleAsk(question) {
       .map((c, i) => `[${i + 1}]（来源：${c.file} 第${c.page}页）\n${c.text}`)
       .join("\n\n---\n\n");
 
+    // 4.1 多模态检索扩展：通过引用位置找到关联图片/表格（RAG-Anything 风格）
+    let mediaBlock = "";
+    let relatedMedia = [];
+    const wantMultimodal = settings.retrievalMode === "multimodal";
+    if (wantMultimodal) {
+      relatedMedia = collectMediaForChunks(topChunks, State.media);
+      const tables = relatedMedia.filter((m) => m.type === "table");
+      const images = relatedMedia.filter((m) => m.type === "image" && (m.dataUrl || m.url));
+      if (tables.length) {
+        mediaBlock +=
+          "\n\n【关联表格】\n" +
+          tables
+            .map((t) => `[${t.label} 第${t.page}页]\n${(t.caption || "").slice(0, 500)}`)
+            .join("\n\n");
+      }
+      if (images.length) {
+        if (settings.vlmApiKey && settings.vlmModel) {
+          addMessage("system", `🖼 正在用 VLM（${settings.vlmModel}）理解 ${images.length} 张图片…`);
+          try {
+            const desc = await askVLM(settings, images);
+            mediaBlock += "\n\n【关联图片（VLM 描述）】\n" + desc;
+          } catch (e) {
+            mediaBlock +=
+              "\n\n【关联图片】\n" +
+              images.map((m) => `[${m.label} 第${m.page}页]（VLM 描述失败：${e.message}）`).join("\n");
+          }
+        } else {
+          // 未配置 VLM：弹窗提醒（仅一次）
+          showVlmModal(
+            "多模态检索命中了文档中的图片，但尚未配置 VLM 模型。图片将仅展示引用，无法生成图片描述。"
+          );
+          mediaBlock +=
+            "\n\n【关联图片】\n" +
+            images.map((m) => `[${m.label} 第${m.page}页]（未配置 VLM，请查看引用片段中的图片）`).join("\n");
+        }
+      }
+    }
+
     // 第 4 层：检索式记忆（从历史与长期记忆中检索相关片段）
     const memHits = memorySearch(question, settings);
     let memContext = "";
@@ -1588,17 +1910,20 @@ async function handleAsk(question) {
       memoryBlock;
 
     const userContent =
-      `参考片段：\n${context}${memContext}\n\n用户问题：${question}`;
+      `参考片段：\n${context}${mediaBlock}${memContext}\n\n用户问题：${question}`;
 
     const answer = await askLLM(settings, systemPrompt, userContent, history);
 
     thinking.textContent = answer;
     thinking.className = "msg assistant";
 
-    // 5. 元信息：检索范围 + 记忆标签
+    // 5. 元信息：检索范围 + 记忆标签 + 媒体引用
     const meta = el("div", "meta");
     meta.appendChild(el("span", "chip", `🔍 检索范围：${scopeName}`));
     if (memHits.length) meta.appendChild(el("span", "chip", `🧠 相关历史：${memHits.length} 条`));
+    if (wantMultimodal && relatedMedia.length) {
+      meta.appendChild(el("span", "chip", `🖼 关联媒体：${relatedMedia.length} 个`));
+    }
     thinking.appendChild(meta);
 
     // 6. 引用片段
@@ -1607,6 +1932,25 @@ async function handleAsk(question) {
     src.appendChild(summary);
     topChunks.forEach((c, i) => {
       src.appendChild(el("div", "", `[${i + 1}] ${c.file} 第${c.page}页：${c.text.slice(0, 120)}…`));
+      // 多模态：展示本分块引用的图片缩略图 / 表格文本
+      if (wantMultimodal) {
+        collectMediaForChunks([c], State.media).forEach((m) => {
+          const row = el("div", "src-media");
+          row.appendChild(el("span", "src-media-label", `${m.label}（第${m.page}页）`));
+          if (m.type === "image" && (m.dataUrl || m.url)) {
+            const img = document.createElement("img");
+            img.src = m.dataUrl || m.url;
+            img.alt = m.label;
+            img.className = "src-media-img";
+            img.loading = "lazy";
+            img.referrerPolicy = "no-referrer";
+            row.appendChild(img);
+          } else if (m.type === "table") {
+            row.appendChild(el("pre", "src-media-table", (m.caption || "").slice(0, 300)));
+          }
+          src.appendChild(row);
+        });
+      }
     });
     thinking.appendChild(src);
 
@@ -1635,7 +1979,20 @@ function bindEvents() {
     Settings.save(collectSettings());
     syncModelTag();
     syncRetrievalStat();
+    syncVlmStat();
     addMessage("system", "设置已保存到本浏览器。");
+  });
+  $("useLlmKey").addEventListener("click", () => {
+    $("vlmApiKey").value = $("apiKey").value;
+    addMessage("system", "已复用 LLM API Key 到 VLM 配置。");
+  });
+  $("vlmModalClose").addEventListener("click", closeVlmModal);
+  $("vlmModalGoto").addEventListener("click", () => {
+    closeVlmModal();
+    switchView("settings");
+  });
+  $("vlmModal").addEventListener("click", (e) => {
+    if (e.target === $("vlmModal")) closeVlmModal();
   });
   $("clearData").addEventListener("click", () => {
     Store.clearAll();
@@ -1643,6 +2000,7 @@ function bindEvents() {
     State.chunks = [];
     State.bm25 = null;
     State.vectors = null;
+    State.media = [];
     State.cats = [];
     State.convs = [];
     State.activeConvId = "";
@@ -1775,6 +2133,8 @@ function init() {
   try {
     State.cats = Store.loadCats();
     State.docs = Store.loadDocs();
+    // 恢复媒体引用图谱（多模态检索用）
+    State.media = State.docs.flatMap((d) => d.media || []);
     State.convs = ConvStore.load();
     State.memories = MemStore.load();
     const savedActive = ConvStore.loadActive();

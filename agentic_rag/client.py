@@ -102,6 +102,7 @@ class AgenticRAG:
         rerank: bool = True,
         conversation_id: Optional[str] = None,
         history: Optional[List[Dict[str, str]]] = None,
+        enable_multimodal: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """
         执行问答（自动路由）
@@ -113,6 +114,7 @@ class AgenticRAG:
             rerank: 是否重排序
             conversation_id: 多轮对话 ID
             history: 对话历史
+            enable_multimodal: 是否启用多模态检索（图片/表格引用，None=使用配置）
 
         Returns:
             dict: {"answer", "route", "confidence", "sources", "conversation_id", "latency_ms", "metadata"}
@@ -126,6 +128,7 @@ class AgenticRAG:
             mode=mode,
             top_k=top_k,
             rerank=rerank,
+            enable_multimodal=enable_multimodal,
         )
         result = self._ensure_orchestrator().query(request)
 
@@ -138,6 +141,66 @@ class AgenticRAG:
             "latency_ms": result.latency_ms,
             "metadata": result.metadata,
         }
+
+    # ── 多模态 / VLM ──
+
+    @property
+    def vlm_configured(self) -> bool:
+        """当前是否已配置 VLM 模型"""
+        orch = self._orchestrator
+        if orch is not None:
+            return bool(getattr(orch, "vlm_client", None))
+        from agentic_rag.config import settings
+        return settings.vlm_configured
+
+    def save_vlm_config(
+        self,
+        model: Optional[str] = None,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+        provider: str = "openai",
+    ) -> dict:
+        """
+        保存 VLM 配置（写入 .env 并热更新当前实例）
+
+        Args:
+            model: VLM 模型名，如 gpt-4o / qwen-vl-max
+            api_key: API Key（传 None 表示保持原值）
+            base_url: Base URL（OpenAI 兼容）
+            provider: 提供商
+
+        Returns:
+            dict: 保存后的配置（脱敏）
+        """
+        from agentic_rag.config import settings
+        if self._config:
+            cfg = settings.model_copy(update=self._config)
+        else:
+            cfg = settings
+        result = cfg.save_vlm_config(
+            provider=provider, model=model, api_key=api_key, base_url=base_url
+        )
+        # 热更新当前实例
+        if self._orchestrator is not None:
+            try:
+                vlm_client = None
+                if cfg.vlm_api_key:
+                    from openai import OpenAI
+                    vlm_client = OpenAI(
+                        api_key=cfg.vlm_api_key,
+                        base_url=cfg.vlm_base_url or cfg.llm_base_url,
+                    )
+                elif cfg.llm_api_key:
+                    vlm_client = self._orchestrator.llm_client
+                self._orchestrator.vlm_client = vlm_client
+                self._orchestrator.vlm_model = cfg.vlm_model
+                if self._orchestrator.standard_rag:
+                    self._orchestrator.standard_rag.vlm_client = vlm_client
+                    self._orchestrator.standard_rag.vlm_model = cfg.vlm_model
+            except Exception as e:
+                from loguru import logger
+                logger.warning(f"VLM 客户端热更新失败（重启后生效）: {e}")
+        return result
 
     # ── 系统状态 ──
 

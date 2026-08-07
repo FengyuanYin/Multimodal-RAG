@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>PDF Chat · BYOK 私有 RAG</title>
   <meta name="description" content="浏览器本地 PDF 问答工具：上传 PDF，自带 API Key，数据不出浏览器。" />
-  <link rel="stylesheet" href="style.css?v=2" />
+  <link rel="stylesheet" href="style.css?v=3" />
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
   <script>
     // pdf.js 使用限制（必须设置 workerSrc 才能解析 PDF）
@@ -175,7 +175,9 @@
                 <option value="keyword">关键词检索（默认）</option>
                 <option value="vector">向量检索（需 Embedding 模型）</option>
                 <option value="hybrid">混合检索（关键词 + 向量）</option>
+                <option value="multimodal">多模态检索（文本 + 图片/表格引用 + VLM）</option>
               </select>
+              <p class="hint">多模态检索会通过知识图谱记录文本中对「图N / 表N」的引用位置，命中文本时自动附带关联的图片与表格（图片交由 VLM 理解）。</p>
             </div>
 
             <div class="row2">
@@ -187,6 +189,34 @@
                 <label for="chunkSize">分块字符数</label>
                 <input type="number" id="chunkSize" min="100" max="4000" value="800" />
               </div>
+            </div>
+          </div>
+
+          <div class="card glass">
+            <h3>🖼 VLM 配置（多模态检索）</h3>
+            <p class="hint">视觉语言模型用于理解文档中的图片/表格。未配置时，多模态检索仍会返回图片/表格引用，但不会生成图片描述。密钥仅保存在本浏览器。</p>
+
+            <div class="field">
+              <label for="vlmApiKey">VLM API Key</label>
+              <div class="key-row">
+                <input type="password" id="vlmApiKey" placeholder="sk-...（可复用上方 LLM Key）" autocomplete="off" />
+                <button id="useLlmKey" type="button" title="复用上方 LLM API Key" class="icon-btn">↩</button>
+              </div>
+            </div>
+
+            <div class="field">
+              <label for="vlmBaseUrl">VLM Base URL（OpenAI 兼容）</label>
+              <input type="text" id="vlmBaseUrl" placeholder="留空则复用 LLM Base URL" />
+            </div>
+
+            <div class="field">
+              <label for="vlmModel">VLM 模型</label>
+              <input type="text" id="vlmModel" placeholder="如 gpt-4o / qwen-vl-max / glm-4v" />
+            </div>
+
+            <div class="field">
+              <label>多模态模型状态</label>
+              <p class="stat-line" id="vlmStat">未配置</p>
             </div>
           </div>
 
@@ -363,6 +393,18 @@
     开源示例 · API Key 仅发送到你配置的 API 地址 · 文档与索引默认保留在浏览器本地
   </footer>
 
-  <script src="app.js?v=9"></script>
+  <!-- ── VLM 未配置提醒弹窗 ── -->
+  <div class="modal-mask hidden" id="vlmModal" role="dialog" aria-modal="true" aria-labelledby="vlmModalTitle">
+    <div class="modal-box glass">
+      <h3 id="vlmModalTitle">🖼 未配置多模态模型（VLM）</h3>
+      <p id="vlmModalMsg">多模态检索需要配置视觉语言模型（VLM）才能理解文档中的图片。</p>
+      <div class="modal-actions">
+        <button id="vlmModalGoto" class="btn primary" type="button">去设置</button>
+        <button id="vlmModalClose" class="btn ghost" type="button">知道了</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js?v=10"></script>
 </body>
 </html>
