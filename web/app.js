@@ -306,32 +306,111 @@ const Parsers = {
   mineru: {
     name: "MinerU 服务",
     async parse(file, settings) {
-      const base = (settings.mineruUrl || "").replace(/\/+$/, "");
-      if (!base) throw new Error("未配置 MinerU API 地址");
-      const fd = new FormData();
-      fd.append("file", file);
-      const resp = await fetch(`${base}/file2text`, { method: "POST", body: fd });
-      if (!resp.ok) {
-        const err = await resp.text().catch(() => "");
-        throw new Error(`MinerU ${resp.status}: ${err.slice(0, 200)}`);
+      if (settings.mineruMode === "official") {
+        return await mineruOfficialParse(file, settings);
       }
-      const data = await resp.json();
-      // 兼容两种返回格式：
-      //   1) { text: "整篇文本" }
-      //   2) { pages: [{ page: 1, text: "..." }] }
-      if (Array.isArray(data.pages) && data.pages.length) {
-        return data.pages.map((p) => ({
-          page: p.page || 1,
-          text: p.text || p.content || "",
-        })).filter((p) => p.text.trim());
-      }
-      if (typeof data.text === "string" && data.text.trim()) {
-        return [{ page: 1, text: data.text }];
-      }
-      throw new Error("MinerU 返回格式无法识别（期望 {text} 或 {pages:[{page,text}]}）");
+      return await mineruSelfhostParse(file, settings);
     },
   },
 };
+
+/* MinerU 自托管：POST /file2text */
+async function mineruSelfhostParse(file, settings) {
+  const base = (settings.mineruUrl || "").replace(/\/+$/, "");
+  if (!base) throw new Error("未配置 MinerU 服务地址（请选择「自托管服务」并填写地址）");
+  const fd = new FormData();
+  fd.append("file", file);
+  const resp = await fetch(`${base}/file2text`, { method: "POST", body: fd });
+  if (!resp.ok) {
+    const err = await resp.text().catch(() => "");
+    throw new Error(`MinerU ${resp.status}: ${err.slice(0, 200)}`);
+  }
+  const data = await resp.json();
+  // 兼容两种返回格式：
+  //   1) { text: "整篇文本" }
+  //   2) { pages: [{ page: 1, text: "..." }] }
+  if (Array.isArray(data.pages) && data.pages.length) {
+    return data.pages.map((p) => ({
+      page: p.page || 1,
+      text: p.text || p.content || "",
+    })).filter((p) => p.text.trim());
+  }
+  if (typeof data.text === "string" && data.text.trim()) {
+    return [{ page: 1, text: data.text }];
+  }
+  throw new Error("MinerU 返回格式无法识别（期望 {text} 或 {pages:[{page,text}]}）");
+}
+
+/* MinerU 官方 API：https://mineru.net —— 上传 → 轮询 → 获取结果 */
+const MINERU_API_BASE = "https://mineru.net/api/v4";
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function mineruFetch(path, settings, options) {
+  const isProxy = settings.callMode === "proxy";
+  const url = isProxy ? `/proxy/mineru${path}` : `${MINERU_API_BASE}${path}`;
+  const headers = { ...(options.headers || {}) };
+  if (isProxy) {
+    headers["X-API-Key"] = settings.mineruApiKey || "";
+  } else {
+    headers["Authorization"] = `Bearer ${settings.mineruApiKey || ""}`;
+  }
+  const resp = await fetch(url, { ...options, headers });
+  if (!resp.ok) {
+    const err = await resp.text().catch(() => "");
+    throw new Error(`MinerU API ${resp.status}: ${err.slice(0, 200)}`);
+  }
+  return resp.json();
+}
+
+async function mineruOfficialParse(file, settings) {
+  if (!settings.mineruApiKey) {
+    throw new Error("使用 MinerU 官方 API 需要填写 API Key");
+  }
+
+  // 1. 创建解析任务（multipart 上传文件）
+  const fd = new FormData();
+  fd.append("file", file);
+  fd.append("is_ocr", "true");
+  fd.append("enable_formula", "true");
+  fd.append("enable_table", "true");
+  fd.append("language", "ch");
+  const task = await mineruFetch("/extract/task", settings, { method: "POST", body: fd });
+  if (!task.data || !task.data.task_id) {
+    throw new Error(`MinerU 任务创建失败：${task.msg || "未知错误"}`);
+  }
+  const taskId = task.data.task_id;
+
+  // 2. 轮询任务状态（最多 5 分钟）
+  const deadline = Date.now() + 5 * 60 * 1000;
+  while (Date.now() < deadline) {
+    await sleep(2000);
+    const status = await mineruFetch(`/extract/task/${taskId}`, settings, { method: "GET" });
+    const st = status.data && status.data.state;
+    if (st === "done") break;
+    if (st === "failed") {
+      throw new Error(`MinerU 解析失败：${(status.data && status.data.err_msg) || "未知错误"}`);
+    }
+    // waiting / running / pending 继续等待
+  }
+
+  // 3. 获取解析结果
+  const result = await mineruFetch(`/extract/result/${taskId}`, settings, { method: "GET" });
+  const extractResult = (result.data && result.data.extract_result) || [];
+  const contents = (extractResult[0] && extractResult[0].extract_content) || [];
+  const pages = contents
+    .map((c) => ({
+      page: (c.page_idx || 0) + 1,
+      text: c.content || c.markdown || "",
+    }))
+    .filter((p) => p.text.trim());
+  if (!pages.length) {
+    throw new Error("MinerU 未返回可用的解析文本");
+  }
+  return pages;
+}
 
 /* ───────────────────────── 分块 ───────────────────────── */
 function splitChunks(text, size, overlap) {
@@ -423,6 +502,8 @@ function loadSettingsIntoForm() {
   $("topK").value = s.topK || 5;
   $("chunkSize").value = s.chunkSize || 800;
   $("parser").value = s.parser || "local";
+  $("mineruMode").value = s.mineruMode || "official";
+  $("mineruApiKey").value = s.mineruApiKey || "";
   $("mineruUrl").value = s.mineruUrl || "";
   syncParserUI();
   syncModelTag();
@@ -440,6 +521,8 @@ function collectSettings() {
     topK: parseInt($("topK").value, 10) || 5,
     chunkSize: parseInt($("chunkSize").value, 10) || 800,
     parser: $("parser").value,
+    mineruMode: $("mineruMode").value,
+    mineruApiKey: $("mineruApiKey").value.trim(),
     mineruUrl: $("mineruUrl").value.trim().replace(/\/+$/, ""),
   };
 }
@@ -447,9 +530,22 @@ function collectSettings() {
 function syncParserUI() {
   const useMineru = $("parser").value === "mineru";
   $("mineruConfig").classList.toggle("hidden", !useMineru);
+  if (useMineru) syncMineruModeUI();
   $("dzSub").textContent = useMineru
-    ? "将由 MinerU 服务解析 · PDF 会发送到该服务"
+    ? (mineruModeSelected() === "official"
+        ? "将由 MinerU 官方 API 解析 · PDF 会发送到 mineru.net"
+        : "将由 MinerU 服务解析 · PDF 会发送到该服务")
     : "本地解析 · 不经过任何服务器";
+}
+
+function mineruModeSelected() {
+  return $("mineruMode").value;
+}
+
+function syncMineruModeUI() {
+  const official = mineruModeSelected() === "official";
+  $("mineruOfficialConfig").classList.toggle("hidden", !official);
+  $("mineruSelfConfig").classList.toggle("hidden", official);
 }
 
 function syncModelTag() {
@@ -625,8 +721,7 @@ async function handleFiles(files) {
       if (!pages.length) {
         addMessage("error", `解析 ${file.name} 未提取到文本内容。`);
         continue;
-      }
-      const doc = {
+      }      const doc = {
         id: uid("doc"),
         name: file.name,
         cat: targetCat,
@@ -796,6 +891,7 @@ async function handleAsk(question) {
 function bindEvents() {
   // 设置
   $("parser").addEventListener("change", syncParserUI);
+  $("mineruMode").addEventListener("change", syncMineruModeUI);
   $("retrievalMode").addEventListener("change", () => {
     syncRetrievalStat();
     addMessage("system", "检索模式已切换，请重新建立索引后生效。");

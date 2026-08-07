@@ -41,18 +41,18 @@
       </div>
 
       <nav class="side-nav" aria-label="主导航">
-        <button class="nav-item active" data-view="settings" type="button">
-          <span class="nav-icon">⚙️</span>
-          <span class="nav-label">设置</span>
+        <button class="nav-item active" data-view="chat" type="button">
+          <span class="nav-icon">💬</span>
+          <span class="nav-label">对话</span>
         </button>
         <button class="nav-item" data-view="docs" type="button">
           <span class="nav-icon">📚</span>
           <span class="nav-label">文档</span>
           <span class="nav-badge" id="docBadge">0</span>
         </button>
-        <button class="nav-item" data-view="chat" type="button">
-          <span class="nav-icon">💬</span>
-          <span class="nav-label">对话</span>
+        <button class="nav-item" data-view="settings" type="button">
+          <span class="nav-icon">⚙️</span>
+          <span class="nav-label">设置</span>
         </button>
       </nav>
 
@@ -65,8 +65,8 @@
 
     <!-- ── 主内容区 ── -->
     <main class="content">
-      <!-- ══ 视图 1：设置 ══ -->
-      <section class="view active" id="view-settings">
+      <!-- ══ 视图：设置 ══ -->
+      <section class="view" id="view-settings">
         <div class="view-head">
           <h2>⚙️ 设置</h2>
           <p>配置 LLM 与文档解析器</p>
@@ -141,9 +141,24 @@
             </div>
 
             <div class="field hidden" id="mineruConfig">
-              <label for="mineruUrl">MinerU API 地址</label>
-              <input type="text" id="mineruUrl" placeholder="http://localhost:8000" />
-              <p class="warn">⚠️ 启用 MinerU 后，上传的 PDF 会发送到该服务解析。请仅使用你信任的 MinerU 服务。</p>
+              <label for="mineruMode">MinerU 服务类型</label>
+              <select id="mineruMode">
+                <option value="official">官方 API（mineru.net，需 API Key）</option>
+                <option value="selfhost">自托管服务（本地部署）</option>
+              </select>
+
+              <div class="field" id="mineruOfficialConfig">
+                <label for="mineruApiKey">MinerU API Key <span class="req">*</span></label>
+                <input type="password" id="mineruApiKey" placeholder="mineru_..." autocomplete="off" />
+                <p class="hint">前往 <a href="https://mineru.net" target="_blank" rel="noopener">mineru.net</a> 获取 API Key。PDF 将发送到 MinerU 官方 API 解析。</p>
+              </div>
+
+              <div class="field hidden" id="mineruSelfConfig">
+                <label for="mineruUrl">MinerU 服务地址</label>
+                <input type="text" id="mineruUrl" placeholder="http://localhost:8000" />
+              </div>
+
+              <p class="warn">⚠️ 启用 MinerU 后，上传的 PDF 会发送到对应 MinerU 服务解析。请仅使用你信任的服务。</p>
             </div>
 
             <div class="field">
@@ -208,8 +223,8 @@
         </div>
       </section>
 
-      <!-- ══ 视图 3：对话 ══ -->
-      <section class="view" id="view-chat">
+      <!-- ══ 视图：对话（默认） ══ -->
+      <section class="view active" id="view-chat">
         <div class="view-head chat-head">
           <div class="head-text">
             <h2>💬 对话</h2>
@@ -249,6 +264,6 @@
     开源示例 · API Key 仅发送到你配置的 API 地址 · 文档与索引默认保留在浏览器本地
   </footer>
 
-  <script src="app.js?v=3"></script>
+  <script src="app.js?v=4"></script>
 </body>
 </html>

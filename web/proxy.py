@@ -79,6 +79,49 @@ async def proxy_embeddings(request: Request):
     return await _forward(request, "embeddings")
 
 
+# ── MinerU 官方 API 转发（https://mineru.net/api/v4） ──
+# 前端将 API Key 放在 X-API-Key 头，代理转发为 Authorization: Bearer
+
+
+async def _forward_mineru(request: Request, path: str):
+    body = await request.body()
+    api_key = request.headers.get("X-API-Key")
+    headers = dict(request.headers)
+    headers.pop("host", None)
+    headers.pop("x-api-key", None)
+    headers["authorization"] = f"Bearer {api_key or ''}"
+    url = f"https://mineru.net/api/v4{path}"
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(180.0, connect=10.0)) as client:
+            resp = await client.request(
+                request.method,
+                url,
+                content=body,
+                headers=headers,
+            )
+        return JSONResponse(
+            status_code=resp.status_code,
+            content=resp.json() if resp.content else {"error": "empty response"},
+        )
+    except httpx.HTTPError as e:
+        return JSONResponse({"error": f"MinerU 代理请求失败: {e}"}, status_code=502)
+
+
+@app.post("/proxy/mineru/extract/task")
+async def proxy_mineru_create_task(request: Request):
+    return await _forward_mineru(request, "/extract/task")
+
+
+@app.get("/proxy/mineru/extract/task/{task_id}")
+async def proxy_mineru_task_status(task_id: str, request: Request):
+    return await _forward_mineru(request, f"/extract/task/{task_id}")
+
+
+@app.get("/proxy/mineru/extract/result/{task_id}")
+async def proxy_mineru_result(task_id: str, request: Request):
+    return await _forward_mineru(request, f"/extract/result/{task_id}")
+
+
 @app.get("/proxy/health")
 async def proxy_health():
     return {"status": "ok"}
