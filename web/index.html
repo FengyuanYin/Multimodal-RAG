@@ -3,17 +3,18 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>PDF Chat · BYOK 私有 RAG</title>
-  <meta name="description" content="浏览器本地 PDF 问答工具：上传 PDF，自带 API Key，数据不出浏览器。" />
+  <title>Multimodal RAG · 本地知识工作台</title>
+  <meta name="description" content="运行于 GitHub Pages 的本地优先多模态 RAG 工作台，支持 PDF、网页、图表引用与可解释检索。" />
   <link rel="stylesheet" href="style.css?v=4" />
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script src="./vendor/pdfjs/pdf.min.js"></script>
   <script>
     // pdf.js 使用限制（必须设置 workerSrc 才能解析 PDF）
     pdfjsLib.GlobalWorkerOptions.workerSrc =
-      "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+      "./vendor/pdfjs/pdf.worker.min.js";
   </script>
 </head>
 <body>
+  <a class="skip-link" href="#workspaceMain">跳到主要内容</a>
   <!-- 背景装饰光斑 -->
   <div class="bg-decor" aria-hidden="true">
     <div class="blob blob-a"></div>
@@ -35,27 +36,27 @@
           </svg>
         </div>
         <div class="brand-text">
-          <h1>PDF Chat</h1>
-          <p>BYOK · 本地 RAG</p>
+          <h1>Multimodal RAG</h1>
+          <p>Local-first workspace</p>
         </div>
       </div>
 
       <nav class="side-nav" aria-label="主导航">
         <button class="nav-item active" data-view="chat" type="button">
-          <span class="nav-icon">💬</span>
+          <svg class="nav-icon" aria-hidden="true"><use href="./assets/icons.svg#chat"></use></svg>
           <span class="nav-label">对话</span>
         </button>
         <button class="nav-item" data-view="docs" type="button">
-          <span class="nav-icon">📚</span>
+          <svg class="nav-icon" aria-hidden="true"><use href="./assets/icons.svg#library"></use></svg>
           <span class="nav-label">知识库</span>
           <span class="nav-badge" id="docBadge">0</span>
         </button>
         <button class="nav-item" data-view="eval" type="button">
-          <span class="nav-icon">📊</span>
+          <svg class="nav-icon" aria-hidden="true"><use href="./assets/icons.svg#chart"></use></svg>
           <span class="nav-label">评估</span>
         </button>
         <button class="nav-item" data-view="settings" type="button">
-          <span class="nav-icon">⚙️</span>
+          <svg class="nav-icon" aria-hidden="true"><use href="./assets/icons.svg#settings"></use></svg>
           <span class="nav-label">设置</span>
         </button>
       </nav>
@@ -63,7 +64,7 @@
       <!-- ── 会话历史（可折叠，点击头部展开/收起） ── -->
       <div class="side-conv" id="sideConv">
         <div class="conv-header" id="convHeader" role="button" tabindex="0" aria-label="切换会话历史">
-          <span class="conv-title">🗂 会话</span>
+          <span class="conv-title">会话</span>
           <span class="conv-count" id="convCount">0</span>
           <button id="newConv" class="conv-new" type="button" title="新建会话">＋</button>
           <button id="convToggle" class="conv-toggle" type="button" title="收起/展开">▾</button>
@@ -72,7 +73,7 @@
           <ul id="convList" class="conv-list"></ul>
           <div class="mem-box">
             <div class="mem-head">
-              <span>🧠 长期记忆</span>
+              <span>长期记忆</span>
               <span class="mem-count" id="memCount">0</span>
             </div>
             <ul id="memList" class="mem-list"></ul>
@@ -81,18 +82,18 @@
       </div>
 
       <div class="side-foot">
-        <div class="privacy-badge" title="文档解析与检索均在浏览器本地完成">
-          <span class="dot"></span> 数据不出浏览器
+        <div class="privacy-badge" title="本地解析和检索默认不上传文档；外部模型与 MinerU 仅在用户配置并调用时发送数据">
+          <span class="dot"></span> GitHub Pages · 本地优先
         </div>
       </div>
     </aside>
 
     <!-- ── 主内容区 ── -->
-    <main class="content">
+    <main class="content" id="workspaceMain" tabindex="-1">
       <!-- ══ 视图：评估 ══ -->
       <section class="view" id="view-eval">
         <div class="view-head">
-          <h2>📊 RAG 评估</h2>
+          <h2>RAG 评估</h2>
           <p>RAGAS 风格指标：评估检索与生成质量</p>
         </div>
         <div class="view-body eval-layout">
@@ -112,7 +113,7 @@
 
             <div class="card-actions">
               <button id="saveEvalSet" class="btn ghost">保存测试集</button>
-              <button id="runEval" class="btn primary">▶ 运行评估</button>
+              <button id="runEval" class="btn primary">运行评估</button>
             </div>
             <p class="hint" id="evalHint">运行前请确认：已在「文档」页建立索引、已配置 LLM。</p>
           </div>
@@ -130,19 +131,19 @@
       <!-- ══ 视图：设置 ══ -->
       <section class="view" id="view-settings">
         <div class="view-head">
-          <h2>⚙️ 设置</h2>
+          <h2>设置</h2>
           <p>配置 LLM 与文档解析器</p>
         </div>
         <div class="view-body settings-grid">
           <div class="card glass">
             <h3>LLM 配置</h3>
-            <p class="hint">密钥仅保存在本浏览器（localStorage），仅发送到你填写的 API 地址。</p>
+            <p class="hint">密钥默认仅保存在当前浏览器会话；只有发起模型请求时才发送到你配置的 API 地址。</p>
 
             <div class="field">
               <label for="apiKey">API Key <span class="req">*</span></label>
               <div class="key-row">
                 <input type="password" id="apiKey" placeholder="sk-..." autocomplete="off" />
-                <button id="toggleKey" type="button" title="显示/隐藏" class="icon-btn">👁</button>
+                <button id="toggleKey" type="button" title="显示或隐藏密钥" aria-label="显示或隐藏 API Key" class="icon-btn"><svg class="icon" aria-hidden="true"><use href="./assets/icons.svg#eye"></use></svg></button>
               </div>
             </div>
 
@@ -193,7 +194,7 @@
           </div>
 
           <div class="card glass">
-            <h3>🖼 VLM 配置（多模态检索）</h3>
+            <h3>VLM 配置（多模态检索）</h3>
             <p class="hint">视觉语言模型用于理解文档中的图片/表格。未配置时，多模态检索仍会返回图片/表格引用，但不会生成图片描述。密钥仅保存在本浏览器。</p>
 
             <div class="field">
@@ -250,7 +251,7 @@
                 <input type="text" id="mineruUrl" placeholder="http://localhost:8000" />
               </div>
 
-              <p class="warn">⚠️ 启用 MinerU 后，上传的 PDF 会发送到对应 MinerU 服务解析。请仅使用你信任的服务。</p>
+              <p class="warn"><strong>注意：</strong>启用 MinerU 后，上传的 PDF 会发送到对应 MinerU 服务解析。请仅使用你信任的服务。</p>
             </div>
 
             <div class="field">
@@ -265,7 +266,7 @@
           </div>
 
           <div class="card glass">
-            <h3>🧠 记忆设置</h3>
+            <h3>记忆设置</h3>
             <p class="hint">对话记忆与长期记忆均只保存在本浏览器，可随时清除。</p>
 
             <div class="field">
@@ -302,7 +303,7 @@
       <!-- ══ 视图 2：知识库 ══ -->
       <section class="view" id="view-docs">
         <div class="view-head">
-          <h2>📚 知识库</h2>
+          <h2>知识库</h2>
           <p>上传 PDF 或从 Web 搜索抓取网页，构建本地检索知识库</p>
         </div>
         <div class="view-body docs-layout">
@@ -321,16 +322,18 @@
           <div class="card glass docs-panel">
             <!-- ══ Web 搜索与抓取 ══ -->
             <div class="web-panel">
-              <h3>🌐 Web 搜索与抓取</h3>
+              <h3>Web 搜索与抓取</h3>
               <p class="hint">搜索互联网或直接粘贴网址，把网页正文抓取进知识库。直连模式受浏览器 CORS 限制，建议使用「同源代理」模式（自托管 web/proxy.py）。</p>
 
               <div class="web-search-row">
-                <select id="webProvider" title="搜索服务提供商">
+                <label class="sr-only" for="webProvider">搜索服务提供商</label>
+                <select id="webProvider" title="搜索服务提供商" aria-label="搜索服务提供商">
                   <option value="duckduckgo">DuckDuckGo（免费，无需 Key）</option>
                   <option value="tavily">Tavily（需 API Key，专为 RAG 设计）</option>
                 </select>
-                <input type="text" id="webSearchQuery" placeholder="输入搜索关键词，如：大语言模型 2024 综述" />
-                <button id="webSearchBtn" class="btn primary" type="button">🔍 搜索</button>
+                <label class="sr-only" for="webSearchQuery">搜索关键词</label>
+                <input type="text" id="webSearchQuery" class="web-query-input" placeholder="输入搜索关键词，如：大语言模型 2024 综述" aria-label="搜索关键词" />
+                <button id="webSearchBtn" class="btn primary web-action-btn" type="button"><svg class="icon" aria-hidden="true"><use href="./assets/icons.svg#search"></use></svg>搜索</button>
               </div>
 
               <div class="field hidden" id="webTavilyConfig">
@@ -341,11 +344,20 @@
                 </div>
               </div>
 
-              <div id="webResults" class="web-results"></div>
+              <div id="webResults" class="web-results" aria-live="polite"></div>
 
               <div class="web-url-row">
-                <input type="text" id="webUrlInput" placeholder="直接粘贴网址（每行一个，如 https://example.com/article）" />
-                <button id="webFetchBtn" class="btn primary" type="button">⬇ 抓取网页</button>
+                <label class="sr-only" for="webUrlInput">网址列表</label>
+                <div class="web-url-input-wrap">
+                  <span class="web-url-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+                      <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+                    </svg>
+                  </span>
+                  <input type="text" id="webUrlInput" class="web-url-input" placeholder="直接粘贴网址（每行一个）" aria-label="网址列表" spellcheck="false" autocomplete="off" />
+                </div>
+                <button id="webFetchBtn" class="btn primary web-action-btn" type="button"><svg class="icon" aria-hidden="true"><use href="./assets/icons.svg#upload"></use></svg>抓取网页</button>
               </div>
             </div>
 
@@ -383,7 +395,7 @@
       <section class="view active" id="view-chat">
         <div class="view-head chat-head">
           <div class="head-text">
-            <h2>💬 对话</h2>
+          <h2>对话</h2>
             <p id="activeConvInfo">选择检索范围，基于文档提问</p>
           </div>
           <div class="chat-filters">
@@ -401,11 +413,11 @@
         <div class="view-body chat-body">
           <div class="chat-main">
             <div id="messages" class="messages">
-              <div class="msg system">👋 上传 PDF 并建立索引后，即可基于文档提问。无需检索的问题（如问候）会直接回答。</div>
+              <div class="msg system">上传 PDF 并建立索引后，即可基于文档提问。检索过程会保留来源、页码和降级状态。</div>
             </div>
             <form id="chatForm" class="chat-form">
               <div class="input-wrap">
-                <textarea id="question" rows="1" placeholder="输入你的问题…（Enter 发送，Shift+Enter 换行）"></textarea>
+                <textarea id="question" rows="1" placeholder="输入问题…" aria-describedby="questionHint"></textarea>
                 <button type="submit" class="btn primary send-btn" id="askBtn" aria-label="发送">
                   <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                     <line x1="22" y1="2" x2="11" y2="13"/>
@@ -413,6 +425,7 @@
                   </svg>
                 </button>
               </div>
+              <span id="questionHint" class="sr-only">按 Enter 发送，按 Shift 加 Enter 换行</span>
             </form>
           </div>
         </div>
@@ -427,7 +440,7 @@
   <!-- ── VLM 未配置提醒弹窗 ── -->
   <div class="modal-mask hidden" id="vlmModal" role="dialog" aria-modal="true" aria-labelledby="vlmModalTitle">
     <div class="modal-box glass">
-      <h3 id="vlmModalTitle">🖼 未配置多模态模型（VLM）</h3>
+      <h3 id="vlmModalTitle">未配置多模态模型（VLM）</h3>
       <p id="vlmModalMsg">多模态检索需要配置视觉语言模型（VLM）才能理解文档中的图片。</p>
       <div class="modal-actions">
         <button id="vlmModalGoto" class="btn primary" type="button">去设置</button>
@@ -436,6 +449,7 @@
     </div>
   </div>
 
-  <script src="app.js?v=11"></script>
+  <div id="liveRegion" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+  <script type="module" src="app.js?v=12"></script>
 </body>
 </html>

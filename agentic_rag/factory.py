@@ -30,6 +30,7 @@ def build_orchestrator(settings_obj=None):
     from agentic_rag.memory.graph_store import GraphStoreFactory
     from agentic_rag.processing.embedders import EmbedderFactory
     from agentic_rag.processing.reranker import RerankerFactory
+    from agentic_rag.memory.knowledge_repository import KnowledgeRepository
 
     cfg = settings_obj or default_settings
 
@@ -117,11 +118,15 @@ def build_orchestrator(settings_obj=None):
     except Exception as e:
         logger.warning(f"重排序器初始化失败: {e}")
 
-    # 6. 混合检索器
+    # 6. SQLite 主知识库与混合检索器
+    knowledge_repository = KnowledgeRepository(
+        getattr(cfg, "knowledge_db_path", "./data/knowledge/knowledge.db")
+    )
     hybrid_retriever = HybridRetriever(
         vector_store=vector_store,
         graph_store=graph_store,
         embedder=embedder,
+        knowledge_repository=knowledge_repository,
     )
     # 媒体资产注册表（RAG-Anything 风格：图片/表格数据 + 引用位置）
     # 自动持久化到磁盘 + 内存上限（超出从磁盘懒加载），避免超大 PDF base64 全部驻留内存
@@ -135,7 +140,9 @@ def build_orchestrator(settings_obj=None):
     hybrid_retriever.media_store = media_store
     # 从持久化文件重建 BM25 索引（服务重启 / 新进程时保留已摄入文档）
     try:
-        hybrid_retriever.load_persisted_index()
+        loaded = hybrid_retriever.rebuild_from_repository()
+        if not loaded:
+            hybrid_retriever.load_persisted_index()
     except Exception as e:
         logger.warning(f"加载持久化索引失败: {e}")
 
@@ -189,6 +196,7 @@ def build_orchestrator(settings_obj=None):
         media_store=media_store,
         enable_multimodal=getattr(cfg, "enable_multimodal_retrieval", False),
     )
+    orchestrator.knowledge_repository = knowledge_repository
 
     logger.info("所有组件初始化完成")
     return orchestrator

@@ -10,6 +10,11 @@
  * ========================================================================= */
 "use strict";
 
+import { initializeIndustrialWorkspace } from "./js/bootstrap.js";
+import { detectMediaReferences, resolveMediaReference, sha256, stableId } from "./js/media-association.js";
+
+initializeIndustrialWorkspace();
+
 /* ───────────────────────── 工具函数 ───────────────────────── */
 const $ = (id) => document.getElementById(id);
 
@@ -58,15 +63,27 @@ function fmtPages(n) {
 /* ───────────────────────── 设置管理 ───────────────────────── */
 const Settings = {
   KEY: "pdfchat.settings.v1",
+  SECRET_FIELDS: ["apiKey", "vlmApiKey", "mineruApiKey", "webTavilyKey"],
   load() {
     try {
-      return JSON.parse(localStorage.getItem(this.KEY) || "{}");
+      const settings = JSON.parse(localStorage.getItem(this.KEY) || "{}");
+      for (const field of this.SECRET_FIELDS) {
+        settings[field] = sessionStorage.getItem(`mmrag.secret.${field}`) || settings[field] || "";
+      }
+      return settings;
     } catch (e) {
       return {};
     }
   },
   save(s) {
-    localStorage.setItem(this.KEY, JSON.stringify(s));
+    const safe = { ...s };
+    for (const field of this.SECRET_FIELDS) {
+      const value = safe[field] || "";
+      delete safe[field];
+      if (value) sessionStorage.setItem(`mmrag.secret.${field}`, value);
+      else sessionStorage.removeItem(`mmrag.secret.${field}`);
+    }
+    localStorage.setItem(this.KEY, JSON.stringify(safe));
   },
 };
 
@@ -435,19 +452,19 @@ const Parsers = {
         } catch (e) {
           /* 渲染失败则跳过页面图像 */
         }
-        // 检测页文本中的「图N / 表N」引用，记录引用位置并建立媒体资产
-        for (const ref of detectMediaRefsInText(text)) {
-          media.push({
-            id: `${ref.type}_${ref.num}_p${p}`,
-            file: file.name,
-            page: p,
-            label: ref.label,
-            type: ref.type,
-            num: ref.num,
-            dataUrl,
-            caption: text.slice(0, 400),
-          });
-        }
+        // pdf.js 无法可靠给出独立图表边界：整页仅作为 fallback 快照，绝不冒充“图 N”。
+        if (dataUrl) media.push({
+          id: `page_snapshot_${p}`,
+          file: file.name,
+          page: p,
+          label: `第${p}页`,
+          type: "page_snapshot",
+          dataUrl,
+          caption: text.slice(0, 400),
+          searchText: text.slice(0, 1200),
+          quality: "fallback",
+          extractionMethod: "pdfjs_page_render",
+        });
       }
       return { pages, media };
     },
@@ -893,10 +910,10 @@ function syncRetrievalStat() {
   const mode = modeMap[s.retrievalMode] || "关键词检索";
   const parts = [s.parser === "mineru" ? "MinerU 解析" : "本地解析", mode];
   if ((s.retrievalMode === "vector" || s.retrievalMode === "hybrid") && !s.embedModel) {
-    parts.push("⚠️ 未配置 Embedding 模型，将自动降级为关键词检索");
+    parts.push("警告：未配置 Embedding 模型，将自动降级为关键词检索");
   }
   if (s.retrievalMode === "multimodal" && !(s.vlmApiKey && s.vlmModel)) {
-    parts.push("⚠️ 未配置 VLM，图片将仅展示引用");
+    parts.push("警告：未配置 VLM，图片将仅展示引用");
   }
   $("retrievalStat").textContent = parts.join(" · ");
 }
@@ -906,7 +923,7 @@ function syncVlmStat() {
   const stat = $("vlmStat");
   if (!stat) return;
   const ok = s.vlmApiKey && s.vlmModel;
-  stat.textContent = ok ? `✅ 已配置 · ${s.vlmModel}` : "⚠️ 未配置（多模态图片将无 VLM 描述）";
+  stat.textContent = ok ? `已配置 · ${s.vlmModel}` : "未配置（多模态图片将无 VLM 描述）";
 }
 
 /* ───────────────────────── 视图切换（侧边栏） ───────────────────────── */
@@ -946,11 +963,11 @@ function renderCatList() {
   list.innerHTML = "";
   for (const cat of currentCats()) {
     const li = el("li");
-    li.appendChild(el("span", "cat-icon", "📁"));
+    li.appendChild(el("span", "cat-icon", "分类"));
     li.appendChild(el("span", "cat-name", cat.name));
     const count = State.docs.filter((d) => d.cat === cat.id).length;
     li.appendChild(el("span", "cat-count", String(count)));
-    const del = el("button", "cat-del", "✕");
+    const del = el("button", "cat-del", "删除");
     del.title = "删除分类（文档保留）";
     del.addEventListener("click", () => {
       State.cats = currentCats().filter((c) => c.id !== cat.id);
@@ -999,7 +1016,7 @@ function renderDocList() {
   list.innerHTML = "";
   for (const doc of State.docs) {
     const li = el("li");
-    const type = doc.parser === "web" ? "🌐 网页" : doc.parser === "mineru" ? "⚙️ MinerU" : "📄 PDF";
+    const type = doc.parser === "web" ? "网页" : doc.parser === "mineru" ? "MinerU" : "PDF";
     const titleWrap = el("div", "doc-title-wrap");
     const titleRow = el("div", "doc-title-row");
     titleRow.appendChild(el("span", "doc-type", type));
@@ -1030,11 +1047,12 @@ function renderDocList() {
     });
     li.appendChild(sel);
 
-    const del = el("button", "del-doc", "🗑");
+    const del = el("button", "del-doc", "删除");
     del.title = "删除条目";
     del.addEventListener("click", () => {
       State.docs = State.docs.filter((d) => d.id !== doc.id);
       Store.saveDocs(State.docs);
+      if (doc.repositoryId) window.MultimodalRAG?.repository.deleteDocument(doc.repositoryId).catch((error) => console.warn("IndexedDB 删除失败", error));
       renderAll();
     });
     li.appendChild(del);
@@ -1165,7 +1183,7 @@ async function handleWebSearch() {
   }
   const box = $("webResults");
   box.innerHTML = "";
-  box.appendChild(el("p", "hint", "🔍 搜索中…"));
+  box.appendChild(el("p", "hint", "搜索中…"));
   try {
     const results = await webSearch(q, settings);
     renderWebResults(results, settings);
@@ -1201,7 +1219,7 @@ async function fetchWebDocs(urls, settings) {
   const targetCat = $("uploadCat").value;
   let ok = 0;
   for (const url of urls) {
-    addMessage("system", `🌐 正在抓取：${url}…`);
+    addMessage("system", `正在抓取：${url}…`);
     try {
       const data = await webFetchUrl(url, settings);
       if (!data.text || !data.text.trim()) {
@@ -1214,7 +1232,7 @@ async function fetchWebDocs(urls, settings) {
       addMessage("error", `抓取 ${url} 失败：${e.message}`);
     }
   }
-  if (ok) addMessage("system", `✅ 已抓取 ${ok} 个网页加入知识库。`);
+  if (ok) addMessage("system", `已抓取 ${ok} 个网页加入知识库。`);
 }
 
 function addWebDoc({ title, url, text, cat }) {
@@ -1382,7 +1400,7 @@ function renderConvList() {
     });
     li.appendChild(rename);
 
-    const del = el("button", "conv-del", "🗑");
+    const del = el("button", "conv-del", "删除");
     del.title = "删除会话";
     del.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -1443,7 +1461,7 @@ function renderMessagesFromConv(conv) {
   const box = $("messages");
   box.innerHTML = "";
   if (!conv || !conv.messages.length) {
-    addMessage("system", "👋 上传 PDF 并建立索引后，即可基于文档提问。无需检索的问题（如问候）会直接回答。");
+    addMessage("system", "上传 PDF 并建立索引后，即可基于文档提问。无需检索的问题会直接回答。");
     return;
   }
   for (const m of conv.messages) {
@@ -1906,6 +1924,53 @@ function renderMemories() {
   }
 }
 
+async function persistWorkspaceToIndexedDB() {
+  const repository = window.MultimodalRAG?.repository;
+  if (!repository) return { documents: 0, warning: "IndexedDB 不可用，仍使用旧版会话存储" };
+  let documents = 0;
+  for (const doc of State.docs) {
+    const fullText = (doc.pages || []).map((page) => page.text || "").join("\n");
+    const fingerprint = await sha256(`${doc.url || doc.name || "document"}\u241f${fullText}`);
+    const documentId = await stableId("doc", fingerprint);
+    const media = [];
+    for (const [index, item] of (doc.media || []).entries()) {
+      media.push({
+        ...item,
+        id: await stableId("media", documentId, item.page || 1, item.type || "image", item.label || index, item.caption || item.searchText || ""),
+        documentId,
+        searchText: item.searchText || item.caption || "",
+        data: item.dataUrl || item.data || null,
+        mimeType: item.dataUrl?.match(/^data:([^;,]+)/)?.[1] || item.mimeType || "",
+        quality: item.quality || (doc.parser === "local" ? "fallback" : "exact"),
+        extractionMethod: item.extractionMethod || doc.parser || "legacy",
+      });
+    }
+    const chunks = [];
+    const references = [];
+    for (const oldChunk of State.chunks.filter((item) => item.docId === doc.id)) {
+      const chunkId = await stableId("chunk", documentId, oldChunk.page || 1, oldChunk.text);
+      chunks.push({ ...oldChunk, id: chunkId, documentId, content: oldChunk.text, modality: "text" });
+      for (const ref of detectMediaReferences(oldChunk.text, documentId, oldChunk.page || 1)) {
+        const decision = resolveMediaReference(ref, media);
+        references.push({
+          id: await stableId("ref", chunkId, ref.label, ref.offset), chunkId, documentId,
+          mediaId: decision.mediaId, mediaType: ref.mediaType, label: ref.label,
+          page: ref.page, offset: ref.offset, confidence: decision.confidence,
+          resolution: decision.resolution, reason: decision.reason,
+        });
+      }
+    }
+    await repository.upsertDocument({
+      document: { id: documentId, fingerprint, name: doc.name || "未命名文档", categoryId: doc.cat || "", source: doc.url || doc.name || "", sourceType: doc.parser === "web" ? "web" : "pdf", parser: doc.parser || "local", pageCount: doc.pages?.length || 1, status: doc.parser === "local" ? "degraded" : "ready" },
+      chunks, media, references,
+    });
+    doc.repositoryId = documentId;
+    documents += 1;
+  }
+  Store.saveDocs(State.docs);
+  return { documents };
+}
+
 /* ───────────────────────── 建立索引 ───────────────────────── */
 async function handleBuildIndex() {
   if (!State.docs.length) {
@@ -1921,6 +1986,7 @@ async function handleBuildIndex() {
   $("buildIndex").disabled = true;
   try {
     State.chunks = buildChunks(State.docs, settings.chunkSize);
+    const persisted = await persistWorkspaceToIndexedDB();
     setProgress(25);
     State.bm25 = buildBM25(State.chunks);
     State.vectors = null;
@@ -1952,7 +2018,7 @@ async function handleBuildIndex() {
       `索引完成：${State.chunks.length} 个分块` +
         (State.vectors ? "（含向量检索）" : "（关键词 BM25 检索）") +
         (wantMultimodal ? `，含 ${State.media.length} 个图片/表格引用` : "") +
-        "。可以开始提问。"
+        `；${persisted.documents || 0} 个文档已事务写入 IndexedDB。可以开始提问。`
     );
   } catch (e) {
     addMessage("error", `建立索引失败：${e.message}`);
@@ -2070,7 +2136,7 @@ async function handleAsk(question) {
       }
       if (images.length) {
         if (settings.vlmApiKey && settings.vlmModel) {
-          addMessage("system", `🖼 正在用 VLM（${settings.vlmModel}）理解 ${images.length} 张图片…`);
+          addMessage("system", `正在用 VLM（${settings.vlmModel}）理解 ${images.length} 张图片…`);
           try {
             const desc = await askVLM(settings, images);
             mediaBlock += "\n\n【关联图片（VLM 描述）】\n" + desc;
@@ -2117,10 +2183,10 @@ async function handleAsk(question) {
 
     // 5. 元信息：检索范围 + 记忆标签 + 媒体引用
     const meta = el("div", "meta");
-    meta.appendChild(el("span", "chip", `🔍 检索范围：${scopeName}`));
-    if (memHits.length) meta.appendChild(el("span", "chip", `🧠 相关历史：${memHits.length} 条`));
+    meta.appendChild(el("span", "chip", `检索范围：${scopeName}`));
+    if (memHits.length) meta.appendChild(el("span", "chip", `相关历史：${memHits.length} 条`));
     if (wantMultimodal && relatedMedia.length) {
-      meta.appendChild(el("span", "chip", `🖼 关联媒体：${relatedMedia.length} 个`));
+      meta.appendChild(el("span", "chip", `关联媒体：${relatedMedia.length} 个`));
     }
     thinking.appendChild(meta);
 
@@ -2192,7 +2258,11 @@ function bindEvents() {
   $("vlmModal").addEventListener("click", (e) => {
     if (e.target === $("vlmModal")) closeVlmModal();
   });
-  $("clearData").addEventListener("click", () => {
+  $("clearData").addEventListener("click", async () => {
+    const repository = window.MultimodalRAG?.repository;
+    if (repository) {
+      for (const doc of State.docs) if (doc.repositoryId) await repository.deleteDocument(doc.repositoryId);
+    }
     Store.clearAll();
     State.docs = [];
     State.chunks = [];
@@ -2257,7 +2327,7 @@ function bindEvents() {
     const q = $("evalQuestions").value;
     const gt = $("evalGroundTruth").value;
     EvalStore.save(q, gt);
-    $("evalStatus").textContent = "✅ 测试集已保存到本浏览器。";
+    $("evalStatus").textContent = "测试集已保存到本浏览器。";
   });
   $("runEval").addEventListener("click", runEvaluation);
 

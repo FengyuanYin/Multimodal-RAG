@@ -7,8 +7,23 @@
 
 from typing import List, Dict, Any, Optional
 from loguru import logger
+import hashlib
+from pathlib import Path
 
 from agentic_rag.rag.hybrid_retriever import ScoredDocument
+
+
+def _document_fingerprint(item: Dict[str, Any]) -> str:
+    """基于内容而非随机 UUID 生成可重复的文档指纹。"""
+    content = item.get("content", "")
+    if isinstance(content, bytes):
+        payload = content
+    elif item.get("modality") == "pdf" and isinstance(content, str) and Path(content).is_file():
+        payload = Path(content).read_bytes()
+    else:
+        payload = str(content).encode("utf-8")
+    source = str(item.get("metadata", {}).get("source", "")).encode("utf-8")
+    return hashlib.sha256(source + b"\0" + payload).hexdigest()
 
 
 def ingest_documents(
@@ -55,15 +70,20 @@ def ingest_documents(
     total_media = 0
     total_refs = 0
     graph_stats = None
-    chunk_seq = 0  # 全局分块序号，保证 chunk_id 跨文档/跨分块唯一
     # 收集所有分块，用于构建 BM25 关键词索引（不依赖嵌入模型）
     index_chunks: List[ScoredDocument] = []
 
     for doc_item in documents:
+        fingerprint = _document_fingerprint(doc_item)
+        stable_doc_id = f"doc_{fingerprint[:20]}"
+        doc_chunk_seq = 0
+        repository_chunks = []
+        repository_refs = []
         # 1. 解析文档（文本/图片/表格/PDF -> 统一 ParsedDocument）
         parsed = parser.parse(
             content=doc_item.get("content", ""),
             modality=doc_item.get("modality", "text"),
+            doc_id=stable_doc_id,
             metadata=doc_item.get("metadata", {}),
         )
 
@@ -95,8 +115,8 @@ def ingest_documents(
             # 重写 chunk_id：分块器对每个 parsed_chunk 都从 _0000 编号，
             # 若不处理，同一文档多个解析块会产生重复 ID，导致向量库相互覆盖
             for chunk in chunks:
-                chunk.chunk_id = f"{parsed.doc_id}_chunk_{chunk_seq:04d}"
-                chunk_seq += 1
+                chunk.chunk_id = f"{parsed.doc_id}_chunk_{doc_chunk_seq:04d}"
+                doc_chunk_seq += 1
 
                 # 重新检测本分块内的图/表引用位置
                 chunk_refs = detect_media_refs(
@@ -105,8 +125,12 @@ def ingest_documents(
                 ref_dicts = [{
                     "media_id": r.media_id, "media_type": r.media_type,
                     "label": r.label, "page": r.page, "offset": r.offset,
+                    "confidence": r.confidence, "resolution": r.resolution,
+                    "reason": r.reason,
                 } for r in chunk_refs]
                 chunk.metadata["media_refs"] = ref_dicts
+                repository_chunks.append(chunk)
+                repository_refs.extend({**ref, "chunk_id": chunk.chunk_id} for ref in ref_dicts)
                 total_refs += len(ref_dicts)
 
                 # 4. 收集分块用于 BM25 关键词索引（任何情况下都可用）
@@ -155,7 +179,23 @@ def ingest_documents(
                     ))
                 hybrid_retriever.vector_store.add(records)
 
-        # 6. 媒体节点入库（图片/表格资产节点）
+        # 6. 先写入事务事实源；派生索引均可从这里重建。
+        knowledge_repository = getattr(orchestrator, "knowledge_repository", None)
+        if knowledge_repository is not None:
+            metadata = doc_item.get("metadata", {})
+            knowledge_repository.upsert_document(
+                {
+                    "id": parsed.doc_id, "fingerprint": fingerprint,
+                    "name": parsed.title, "source_type": doc_item.get("modality", "text"),
+                    "source": metadata.get("source", ""), "category_id": doc_item.get("collection", ""),
+                    "parser": metadata.get("parser", "local"),
+                    "page_count": max((int(c.metadata.get("page", 1) or 1) for c in parsed.chunks), default=1),
+                    "status": "ready", "metadata": metadata,
+                },
+                repository_chunks, parsed.media, repository_refs,
+            )
+
+        # 7. 媒体节点入库（图片/表格资产节点）
         if build_graph and graph_rag and graph_rag.graph_store and parsed.media:
             gs = graph_rag.graph_store
             try:
@@ -172,7 +212,7 @@ def ingest_documents(
             except Exception as e:
                 logger.warning(f"媒体节点入库失败: {e}")
 
-        # 7. 构建实体知识图谱（可选）——使用该文档全部解析块，聚合各次构建统计
+        # 8. 构建实体知识图谱（可选）——使用该文档全部解析块，聚合各次构建统计
         if build_graph and graph_rag and graph_rag.graph_store:
             doc_text = "\n".join(c.content for c in parsed.chunks if c.content)
             stats = graph_rag.build_graph_from_documents([
@@ -184,11 +224,14 @@ def ingest_documents(
                 for key in ("entities", "relations", "documents", "communities"):
                     graph_stats[key] = graph_stats.get(key, 0) + stats.get(key, 0)
 
-    # 8. 构建 BM25 关键词索引（保证无嵌入模型时关键词检索仍可用）
+    # 9. 构建 BM25 关键词索引（保证无嵌入模型时关键词检索仍可用）
     if hybrid_retriever and index_chunks:
-        hybrid_retriever.build_index(index_chunks, append=True)
-        # 持久化分块到磁盘，供新进程/重启后重建索引
-        _persist_chunks(index_chunks, path=index_path)
+        if getattr(orchestrator, "knowledge_repository", None) is not None:
+            hybrid_retriever.rebuild_from_repository()
+        else:
+            hybrid_retriever.build_index(index_chunks, append=True)
+            # 兼容未启用 SQLite 的旧调用方。
+            _persist_chunks(index_chunks, path=index_path)
         logger.info(f"BM25 索引构建完成: {len(index_chunks)} 个分块")
 
     result = {
@@ -227,3 +270,29 @@ def _persist_chunks(chunks: List[ScoredDocument], path: Optional[str] = None) ->
             }, ensure_ascii=False) + "\n")
     logger.info(f"分块已持久化: {len(chunks)} 条 -> {path}")
     return path
+
+
+def rebuild_indexes(orchestrator) -> Dict[str, Any]:
+    """从 SQLite 事实源重建可重建的关键词索引。"""
+    retriever = getattr(orchestrator, "hybrid_retriever", None)
+    repository = getattr(orchestrator, "knowledge_repository", None)
+    if retriever is None or repository is None:
+        raise RuntimeError("knowledge repository is not configured")
+    count = retriever.rebuild_from_repository()
+    return {"status": "success", "indexed_items": count, "integrity": repository.integrity_check()}
+
+
+def delete_document(orchestrator, document_id: str) -> Dict[str, Any]:
+    """先从检索视图隐藏，再删除派生向量，最后事务级联清除事实数据。"""
+    repository = getattr(orchestrator, "knowledge_repository", None)
+    retriever = getattr(orchestrator, "hybrid_retriever", None)
+    if repository is None or repository.get_document(document_id) is None:
+        return {"status": "not_found", "document_id": document_id}
+    repository.mark_unsearchable(document_id)
+    chunk_ids = [item["id"] for item in repository.list_chunks(document_id)]
+    vector_store = getattr(retriever, "vector_store", None) if retriever else None
+    if vector_store and chunk_ids:
+        vector_store.delete(chunk_ids)
+    repository.delete_document(document_id)
+    indexed = retriever.rebuild_from_repository() if retriever else 0
+    return {"status": "success", "document_id": document_id, "deleted_chunks": len(chunk_ids), "indexed_items": indexed}

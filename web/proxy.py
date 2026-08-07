@@ -17,26 +17,63 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import httpx
+import asyncio
+import ipaddress
+import os
+import socket
+from urllib.parse import urljoin, urlsplit
 
 app = FastAPI(title="PDF Chat Proxy")
 
-# 允许任意来源：代理本身不存 Key，CORS 放开是为了让任意前端页面可用
+_ALLOWED_ORIGINS = [item.strip() for item in os.getenv(
+    "AGR_PROXY_ALLOWED_ORIGINS",
+    "https://fengyuanyin.github.io,http://localhost:8000,http://127.0.0.1:8000",
+).split(",") if item.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_ALLOWED_ORIGINS,
     allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "X-API-Key"],
 )
 
 _TIMEOUT = httpx.Timeout(120.0, connect=10.0)
 _FETCH_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 _MAX_FETCH_BYTES = 2 * 1024 * 1024  # 网页抓取大小上限 2MB
+_MAX_REQUEST_BYTES = 10 * 1024 * 1024
+_ALLOW_PRIVATE = os.getenv("AGR_PROXY_ALLOW_PRIVATE", "").lower() in {"1", "true", "yes"}
+_ALLOWED_TARGET_HOSTS = {item.strip().lower() for item in os.getenv("AGR_PROXY_ALLOWED_HOSTS", "").split(",") if item.strip()}
+
+
+async def _validate_target(url: str) -> str:
+    """拒绝凭据 URL、非 HTTP 协议和解析到内网/保留地址的目标。"""
+    parsed = urlsplit(url.strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+        raise ValueError("目标地址必须是无凭据的 HTTP(S) URL")
+    host = parsed.hostname.lower().rstrip(".")
+    if _ALLOWED_TARGET_HOSTS and host not in _ALLOWED_TARGET_HOSTS:
+        raise ValueError("目标主机不在允许列表中")
+    if _ALLOW_PRIVATE:
+        return url
+    try:
+        infos = await asyncio.get_running_loop().getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise ValueError("目标主机无法解析") from exc
+    addresses = {item[4][0].split("%", 1)[0] for item in infos}
+    if not addresses:
+        raise ValueError("目标主机没有可用地址")
+    for value in addresses:
+        address = ipaddress.ip_address(value)
+        if not address.is_global:
+            raise ValueError("禁止访问本地、内网或保留地址")
+    return url
 
 
 async def _forward(request: Request, path: str):
     """将请求转发到客户端指定的 base_url，保持原始 body 与鉴权头"""
     body = await request.body()
+    if len(body) > _MAX_REQUEST_BYTES:
+        return JSONResponse({"error": "请求体超过 10MB 上限"}, status_code=413)
     # 读取前端传入的目标地址与模型配置
     try:
         import json
@@ -56,6 +93,7 @@ async def _forward(request: Request, path: str):
 
     url = f"{base_url.rstrip('/')}/{path}"
     try:
+        await _validate_target(url)
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
             resp = await client.request(
                 request.method,
@@ -67,8 +105,10 @@ async def _forward(request: Request, path: str):
             status_code=resp.status_code,
             content=resp.json() if resp.content else {"error": "empty response"},
         )
-    except httpx.HTTPError as e:
-        return JSONResponse({"error": f"代理请求失败: {e}"}, status_code=502)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except httpx.HTTPError:
+        return JSONResponse({"error": "上游代理请求失败"}, status_code=502)
 
 
 @app.post("/proxy/chat/completions")
@@ -85,11 +125,12 @@ async def proxy_embeddings(request: Request):
 
 
 def _is_safe_url(url: str) -> bool:
-    """基本 URL 校验：仅 http/https，避免非 HTTP 协议（如 file://）"""
-    if not url:
+    """无网络解析的基础 URL 语法校验。"""
+    try:
+        parsed = urlsplit((url or "").strip())
+        return parsed.scheme in {"http", "https"} and bool(parsed.hostname) and not parsed.username and not parsed.password
+    except ValueError:
         return False
-    low = url.strip().lower()
-    return low.startswith("http://") or low.startswith("https://")
 
 
 def _html_to_text(html: str) -> str:
@@ -146,18 +187,34 @@ async def _fetch_html(url: str) -> tuple:
         "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
     }
-    async with httpx.AsyncClient(timeout=_FETCH_TIMEOUT, follow_redirects=True) as client:
-        async with client.stream("GET", url, headers=headers) as resp:
-            resp.raise_for_status()
-            chunks = []
-            total = 0
-            async for chunk in resp.aiter_bytes():
-                total += len(chunk)
-                if total > _MAX_FETCH_BYTES:
-                    raise ValueError("网页内容超过 2MB 上限，已截断")
-                chunks.append(chunk)
-            final_url = str(resp.url)
-    return b"".join(chunks).decode("utf-8", errors="ignore"), final_url
+    current = url
+    async with httpx.AsyncClient(timeout=_FETCH_TIMEOUT, follow_redirects=False) as client:
+        for _ in range(4):
+            await _validate_target(current)
+            async with client.stream("GET", current, headers=headers) as resp:
+                if resp.is_redirect:
+                    location = resp.headers.get("location")
+                    if not location:
+                        raise ValueError("重定向缺少目标地址")
+                    current = urljoin(current, location)
+                    continue
+                resp.raise_for_status()
+                content_type = resp.headers.get("content-type", "").lower()
+                if content_type and not any(item in content_type for item in ("text/html", "application/xhtml+xml", "text/plain")):
+                    raise ValueError("目标不是可解析的网页内容")
+                declared_length = int(resp.headers.get("content-length", "0") or 0)
+                if declared_length > _MAX_FETCH_BYTES:
+                    raise ValueError("网页内容超过 2MB 上限")
+                chunks = []
+                total = 0
+                async for chunk in resp.aiter_bytes():
+                    total += len(chunk)
+                    if total > _MAX_FETCH_BYTES:
+                        raise ValueError("网页内容超过 2MB 上限")
+                    chunks.append(chunk)
+                final_url = str(resp.url)
+                return b"".join(chunks).decode(resp.encoding or "utf-8", errors="ignore"), final_url
+        raise ValueError("网页重定向次数过多")
 
 
 @app.get("/proxy/web/fetch")
@@ -176,8 +233,8 @@ async def proxy_web_fetch(url: str):
             "title": title,
             "text": text[:500000],  # 单页最多保留 50 万字符
         })
-    except httpx.HTTPError as e:
-        return JSONResponse({"error": f"网页抓取失败: {e}"}, status_code=502)
+    except httpx.HTTPError:
+        return JSONResponse({"error": "网页抓取上游请求失败"}, status_code=502)
     except Exception as e:
         return JSONResponse({"error": f"网页抓取失败: {e}"}, status_code=502)
 
@@ -193,10 +250,12 @@ async def proxy_web_search(request: Request):
     query = (payload.get("query") or "").strip()
     if not query:
         return JSONResponse({"error": "缺少 query"}, status_code=400)
+    if len(query) > 500:
+        return JSONResponse({"error": "query 超过 500 字符上限"}, status_code=413)
 
     provider = (payload.get("provider") or "duckduckgo").lower()
     api_key = (payload.get("api_key") or "").strip()
-    max_results = int(payload.get("max_results") or 6)
+    max_results = max(1, min(10, int(payload.get("max_results") or 6)))
 
     try:
         if provider == "tavily":
@@ -206,8 +265,8 @@ async def proxy_web_search(request: Request):
         else:
             results = await _search_duckduckgo(query, max_results)
         return JSONResponse({"results": results, "provider": provider})
-    except httpx.HTTPError as e:
-        return JSONResponse({"error": f"搜索请求失败: {e}"}, status_code=502)
+    except httpx.HTTPError:
+        return JSONResponse({"error": "搜索上游请求失败"}, status_code=502)
     except Exception as e:
         return JSONResponse({"error": f"搜索失败: {e}"}, status_code=502)
 
@@ -274,6 +333,8 @@ async def _search_tavily(query: str, api_key: str, max_results: int) -> list:
 
 async def _forward_mineru(request: Request, path: str):
     body = await request.body()
+    if len(body) > _MAX_REQUEST_BYTES:
+        return JSONResponse({"error": "请求体超过 10MB 上限"}, status_code=413)
     api_key = request.headers.get("X-API-Key")
     headers = dict(request.headers)
     headers.pop("host", None)
