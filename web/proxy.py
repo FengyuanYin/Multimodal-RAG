@@ -15,7 +15,7 @@ PDF Chat 可选同源代理服务器
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 import httpx
 import asyncio
 import ipaddress
@@ -41,6 +41,7 @@ _TIMEOUT = httpx.Timeout(120.0, connect=10.0)
 _FETCH_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 _MAX_FETCH_BYTES = 2 * 1024 * 1024  # 网页抓取大小上限 2MB
 _MAX_REQUEST_BYTES = 10 * 1024 * 1024
+_MAX_STREAM_BYTES = 32 * 1024 * 1024
 _ALLOW_PRIVATE = os.getenv("AGR_PROXY_ALLOW_PRIVATE", "").lower() in {"1", "true", "yes"}
 _ALLOWED_TARGET_HOSTS = {item.strip().lower() for item in os.getenv("AGR_PROXY_ALLOWED_HOSTS", "").split(",") if item.strip()}
 
@@ -94,6 +95,51 @@ async def _forward(request: Request, path: str):
     url = f"{base_url.rstrip('/')}/{path}"
     try:
         await _validate_target(url)
+        if payload.get("stream") is True:
+            client = httpx.AsyncClient(timeout=_TIMEOUT)
+            try:
+                upstream = await client.send(
+                    client.build_request(
+                        request.method,
+                        url,
+                        content=json.dumps(payload).encode("utf-8"),
+                        headers=headers,
+                    ),
+                    stream=True,
+                )
+            except Exception:
+                await client.aclose()
+                raise
+            if upstream.status_code >= 400:
+                content = await upstream.aread()
+                await upstream.aclose()
+                await client.aclose()
+                try:
+                    detail = json.loads(content) if content else {"error": "empty response"}
+                except Exception:
+                    detail = {"error": "上游模型请求失败"}
+                return JSONResponse(status_code=upstream.status_code, content=detail)
+
+            async def relay():
+                total = 0
+                try:
+                    async for chunk in upstream.aiter_bytes():
+                        total += len(chunk)
+                        if total > _MAX_STREAM_BYTES:
+                            yield b'event: error\ndata: {"error":{"message":"stream response exceeded 32MB"}}\n\n'
+                            break
+                        yield chunk
+                finally:
+                    await upstream.aclose()
+                    await client.aclose()
+
+            return StreamingResponse(
+                relay(),
+                status_code=upstream.status_code,
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
+            )
+
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
             resp = await client.request(
                 request.method,

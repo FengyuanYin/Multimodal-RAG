@@ -12,6 +12,7 @@
 
 import { initializeIndustrialWorkspace } from "./js/bootstrap.js";
 import { detectMediaReferences, resolveMediaReference, sha256, stableId } from "./js/media-association.js";
+import { readOpenAIStream } from "./js/streaming.js";
 
 initializeIndustrialWorkspace();
 
@@ -202,6 +203,7 @@ const State = {
   activeConvId: "",
   // 长期记忆条目：[{ id, type, content, ts }]
   memories: [],
+  generationController: null,
 };
 
 /* ───────────────────────── 图/表引用检测（RAG-Anything 风格） ───────────────────────── */
@@ -329,12 +331,13 @@ function buildBM25(chunks) {
 }
 
 /* ───────────────────────── 向量检索（可选） ───────────────────────── */
-async function embedTexts(texts, settings) {
+async function embedTexts(texts, settings, options = {}) {
   const body = { model: settings.embedModel, input: texts };
   const resp = await fetch(apiUrl("/embeddings", settings), {
     method: "POST",
     headers: apiHeaders(settings),
     body: JSON.stringify(apiBody(body, settings)),
+    signal: options.signal,
   });
   if (!resp.ok) {
     const err = await resp.text().catch(() => "");
@@ -725,7 +728,7 @@ function isDirectAnswerable(q) {
 }
 
 /* ───────────────────────── 对话（OpenAI 兼容） ───────────────────────── */
-async function askLLM(settings, systemPrompt, userContent, history) {
+async function askLLM(settings, systemPrompt, userContent, history, options = {}) {
   const messages = [{ role: "system", content: systemPrompt }];
   if (history && history.length) {
     messages.push(...history);
@@ -741,23 +744,53 @@ async function askLLM(settings, systemPrompt, userContent, history) {
           model: settings.model,
           messages: messages,
           temperature: 0.2,
+          stream: true,
         },
         settings
       )
     ),
+    signal: options.signal,
   });
   if (!resp.ok) {
     const err = await resp.text().catch(() => "");
     throw new Error(`LLM API ${resp.status}: ${err.slice(0, 300)}`);
   }
-  const data = await resp.json();
-  const choice = data.choices && data.choices[0];
-  const msg = choice && choice.message;
-  return (msg && msg.content) || "";
+  return readOpenAIStream(resp, options.onDelta);
+}
+
+function setGenerationUI(active) {
+  $("askBtn").disabled = active;
+  $("stopBtn").classList.toggle("hidden", !active);
+  $("stopBtn").disabled = !active;
+  $("streamStatus").classList.toggle("active", active);
+  $("streamStatusText").textContent = active ? "正在生成" : "流式响应已就绪";
+  $("liveRegion").textContent = active ? "正在生成回答" : "回答生成结束";
+}
+
+function streamIntoMessage(message) {
+  let answer = "";
+  let frame = 0;
+  const paint = () => {
+    frame = 0;
+    message.textContent = answer || "正在连接模型…";
+    const box = $("messages");
+    if (box.scrollHeight - box.scrollTop - box.clientHeight < 120) box.scrollTop = box.scrollHeight;
+  };
+  return {
+    append(delta) {
+      answer += delta;
+      if (!frame) frame = requestAnimationFrame(paint);
+    },
+    flush() {
+      if (frame) cancelAnimationFrame(frame);
+      paint();
+      return answer;
+    },
+  };
 }
 
 /* ───────────────────────── VLM 多模态理解（图片/表格） ───────────────────────── */
-async function askVLM(settings, imageMedia) {
+async function askVLM(settings, imageMedia, options = {}) {
   // OpenAI 兼容多模态输入：content 为 text + image_url 数组
   const content = [
     {
@@ -785,6 +818,7 @@ async function askVLM(settings, imageMedia) {
         settings
       )
     ),
+    signal: options.signal,
   });
   if (!resp.ok) {
     const err = await resp.text().catch(() => "");
@@ -1600,7 +1634,7 @@ async function evalRetrieve(question, settings) {
   if ((settings.retrievalMode === "vector" || settings.retrievalMode === "hybrid") &&
       State.vectors && settings.embedModel) {
     try {
-      const [qvec] = await embedTexts([question], settings);
+      const [qvec] = await embedTexts([question], settings, { signal: controller.signal });
       vectorHits = vectorSearch(qvec, State, settings.topK * 2, filter);
     } catch (e) {
       console.warn("评估向量检索失败（忽略）:", e);
@@ -2047,7 +2081,10 @@ async function handleAsk(question) {
   addMessage("user", question);
   pushConvMessage("user", question);
   const thinking = addMessage("assistant", "思考中…");
-  $("askBtn").disabled = true;
+  const streamView = streamIntoMessage(thinking);
+  const controller = new AbortController();
+  State.generationController = controller;
+  setGenerationUI(true);
 
   try {
     // 第 1 层：短期记忆（最近 N 轮）
@@ -2065,8 +2102,11 @@ async function handleAsk(question) {
       const system =
         "你是一个友好、简洁的 AI 助手。用户问的是问候或自我介绍类问题，不需要检索文档，请直接、简短地回答（1-3 句话）。" +
         memoryBlock;
-      const answer = await askLLM(settings, system, question, history);
-      thinking.textContent = answer;
+      const answer = await askLLM(settings, system, question, history, {
+        signal: controller.signal,
+        onDelta: (delta) => streamView.append(delta),
+      });
+      streamView.flush();
       thinking.className = "msg assistant";
       const chip = el("span", "chip no-retrieval", "⚡ 未使用检索 · 直接回答");
       thinking.appendChild(el("div", "meta")).appendChild(chip);
@@ -2138,7 +2178,7 @@ async function handleAsk(question) {
         if (settings.vlmApiKey && settings.vlmModel) {
           addMessage("system", `正在用 VLM（${settings.vlmModel}）理解 ${images.length} 张图片…`);
           try {
-            const desc = await askVLM(settings, images);
+            const desc = await askVLM(settings, images, { signal: controller.signal });
             mediaBlock += "\n\n【关联图片（VLM 描述）】\n" + desc;
           } catch (e) {
             mediaBlock +=
@@ -2176,9 +2216,12 @@ async function handleAsk(question) {
     const userContent =
       `参考片段：\n${context}${mediaBlock}${memContext}\n\n用户问题：${question}`;
 
-    const answer = await askLLM(settings, systemPrompt, userContent, history);
+    const answer = await askLLM(settings, systemPrompt, userContent, history, {
+      signal: controller.signal,
+      onDelta: (delta) => streamView.append(delta),
+    });
 
-    thinking.textContent = answer;
+    streamView.flush();
     thinking.className = "msg assistant";
 
     // 5. 元信息：检索范围 + 记忆标签 + 媒体引用
@@ -2223,10 +2266,20 @@ async function handleAsk(question) {
     renderMemories();
     extractMemories(question, answer, settings); // 第 3 层：后台提取记忆
   } catch (e) {
-    thinking.textContent = `请求失败：${e.message}`;
-    thinking.className = "msg error";
+    const partial = streamView.flush();
+    if (e.name === "AbortError") {
+      thinking.textContent = partial || "已停止生成。";
+      thinking.className = "msg assistant interrupted";
+      thinking.appendChild(el("div", "meta", "生成已停止"));
+      if (partial) pushConvMessage("assistant", partial, ["生成已停止"]);
+    } else {
+      thinking.textContent = partial ? `${partial}\n\n[流式连接中断：${e.message}]` : `请求失败：${e.message}`;
+      thinking.className = partial ? "msg assistant interrupted" : "msg error";
+      if (partial) pushConvMessage("assistant", partial, ["流式连接中断"]);
+    }
   } finally {
-    $("askBtn").disabled = false;
+    if (State.generationController === controller) State.generationController = null;
+    setGenerationUI(false);
   }
 }
 
@@ -2320,6 +2373,9 @@ function bindEvents() {
     } else {
       addMessage("system", "当前会话已经是空的。");
     }
+  });
+  $("stopBtn").addEventListener("click", () => {
+    if (State.generationController) State.generationController.abort();
   });
 
   // 评估
