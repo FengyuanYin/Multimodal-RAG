@@ -846,6 +846,7 @@ function clearCurrentConversation() {
   if (!conv) return;
   conv.messages = [];
   conv.title = "新对话";
+  conv.renamed = false;
   conv.updatedAt = Date.now();
   ConvStore.save(State.convs);
   renderConvList();
@@ -902,6 +903,15 @@ function renderConvList() {
     }
     label.appendChild(subRow);
     li.appendChild(label);
+
+    const rename = el("button", "conv-rename", "✏️");
+    rename.title = "重命名会话";
+    rename.addEventListener("click", (e) => {
+      e.stopPropagation();
+      renameConversation(conv.id);
+    });
+    li.appendChild(rename);
+
     const del = el("button", "conv-del", "🗑");
     del.title = "删除会话";
     del.addEventListener("click", (e) => {
@@ -913,6 +923,25 @@ function renderConvList() {
     list.appendChild(li);
   }
   renderActiveConvInfo();
+}
+
+/* 重命名会话：使用浏览器原生 prompt（兼容简单、无需额外 UI） */
+function renameConversation(id) {
+  const conv = State.convs.find((c) => c.id === id);
+  if (!conv) return;
+  const newName = prompt("请输入新的会话名称：", conv.title || "");
+  if (newName === null) return; // 用户取消
+  const trimmed = newName.trim();
+  if (!trimmed) {
+    addMessage("system", "会话名称不能为空。");
+    return;
+  }
+  conv.title = trimmed.slice(0, 50); // 限制长度
+  conv.renamed = true; // 标记用户已手动命名，避免自动标题覆盖
+  conv.updatedAt = Date.now();
+  ConvStore.save(State.convs);
+  renderConvList();
+  addMessage("system", `会话已重命名为「${conv.title}」。`);
 }
 
 /* 相对时间显示：刚刚 / N 分钟前 / N 小时前 / 昨天 / 日期 */
@@ -971,9 +1000,9 @@ function pushConvMessage(role, content, meta) {
   if (conv.messages.length > 60) {
     conv.messages = conv.messages.slice(-60);
   }
-  // 自动更新标题：用第一条用户消息
+  // 自动更新标题：仅当用户未手动重命名且标题仍是默认值时
   const firstUser = conv.messages.find((m) => m.role === "user");
-  if (firstUser && conv.title === "新对话") {
+  if (firstUser && !conv.renamed && (conv.title === "新对话" || !conv.title)) {
     conv.title = firstUser.content.slice(0, 24) || "新对话";
   }
   saveConversation(conv);

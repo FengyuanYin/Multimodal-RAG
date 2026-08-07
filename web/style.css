@@ -810,6 +810,19 @@ select option { background: #121a33; color: var(--text); }
   flex: none;
 }
 .conv-del:hover { color: var(--danger); background: var(--danger-bg); }
+.conv-rename {
+  border: none;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 3px 4px;
+  border-radius: 6px;
+  transition: all 0.15s;
+  flex: none;
+  opacity: 0.75;
+}
+.conv-rename:hover { color: var(--accent); background: rgba(34, 211, 238, 0.12); opacity: 1; }
 .conv-empty { color: var(--muted); font-size: 12px; text-align: center; padding: 10px 0; }
 
 .mem-box {
