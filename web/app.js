@@ -65,6 +65,14 @@ function loadSettingsIntoForm() {
   $("embedModel").value = s.embedModel || "";
   $("topK").value = s.topK || 5;
   $("chunkSize").value = s.chunkSize || 800;
+  syncModelTag();
+}
+
+function syncModelTag() {
+  const tag = $("modelTag");
+  if (!tag) return;
+  const s = Settings.load();
+  tag.textContent = s.model ? `模型 · ${s.model}` : "未配置";
 }
 
 function collectSettings() {
@@ -474,6 +482,7 @@ function bindEvents() {
   // 设置
   $("saveSettings").addEventListener("click", () => {
     Settings.save(collectSettings());
+    syncModelTag();
     addMessage("system", "设置已保存到本浏览器。");
   });
   $("clearData").addEventListener("click", () => {
