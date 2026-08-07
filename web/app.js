@@ -409,7 +409,10 @@ function rrfMerge(lists, topK, k = 60) {
 
 /* ───────────────────────── API 请求封装（直连 / 同源代理） ───────────────────────── */
 function apiUrl(path, settings) {
-  if (settings.callMode === "proxy") return `/proxy${path}`;
+  if (settings.callMode === "proxy") {
+    const proxy = normalizeProxyUrl(settings.serviceProxyUrl || "", "服务代理");
+    return `${proxy}/proxy${path}`;
+  }
   return `${settings.baseUrl}${path}`;
 }
 function apiHeaders(settings) {
@@ -589,7 +592,7 @@ async function mineruOfficialParse(file, settings) {
   if (!settings.mineruApiKey) {
     throw new Error("使用 MinerU 官方 API 需要填写 API Key");
   }
-  const configuredProxy = (settings.mineruProxyUrl || "").trim().replace(/\/+$/, "");
+  const configuredProxy = (settings.mineruProxyUrl || settings.serviceProxyUrl || "").trim().replace(/\/+$/, "");
   const onGitHubPages = location.hostname.endsWith("github.io");
   const proxyBase = configuredProxy || (onGitHubPages ? "" : location.origin);
   if (!proxyBase) {
@@ -830,6 +833,8 @@ function loadSettingsIntoForm() {
   // Web 搜索配置（知识库 Web 抓取）
   $("webProvider").value = s.webProvider || "duckduckgo";
   $("webTavilyKey").value = s.webTavilyKey || "";
+  $("serviceProxyUrl").value = s.serviceProxyUrl || "";
+  syncWebProxyStatus();
   syncWebProviderUI();
   $("enableMemory").checked = s.enableMemory !== false;
   $("memoryRounds").value = s.memoryRounds || 10;
@@ -859,6 +864,7 @@ function collectSettings() {
     vlmModel: $("vlmModel").value.trim(),
     webProvider: $("webProvider").value,
     webTavilyKey: $("webTavilyKey").value.trim(),
+    serviceProxyUrl: $("serviceProxyUrl").value.trim().replace(/\/+$/, ""),
     enableMemory: $("enableMemory").checked,
     memoryRounds: parseInt($("memoryRounds").value, 10) || 10,
   };
@@ -893,7 +899,7 @@ function syncMineruModeUI() {
 function validateMineruSettings(settings) {
   if (settings.parser !== "mineru" || settings.mineruMode !== "official") return "";
   if (!settings.mineruApiKey) return "请填写 MinerU API Key";
-  const proxy = (settings.mineruProxyUrl || "").trim();
+  const proxy = (settings.mineruProxyUrl || settings.serviceProxyUrl || "").trim();
   if (!proxy && location.hostname.endsWith("github.io")) {
     return "GitHub Pages 无法直连 MinerU，请填写已部署的 HTTPS 代理地址";
   }
@@ -1100,22 +1106,58 @@ function renderAll() {
 }
 
 /* ───────────────────────── Web 搜索与网页抓取（知识库） ───────────────────────── */
+function normalizeProxyUrl(value, label = "服务代理") {
+  const configured = (value || "").trim().replace(/\/+$/, "");
+  if (!configured) return "";
+  let parsed;
+  try {
+    parsed = new URL(configured);
+  } catch {
+    throw new Error(`${label}地址无效，请填写完整 URL`);
+  }
+  const local = ["localhost", "127.0.0.1", "[::1]"].includes(parsed.hostname);
+  if (parsed.protocol !== "https:" && !(local && parsed.protocol === "http:")) {
+    throw new Error(`${label}必须使用 HTTPS（本机 localhost 除外）`);
+  }
+  return configured;
+}
+
 function webApiBase(settings) {
-  // 同源代理模式下所有 Web 抓取/搜索都经 /proxy/web/*
-  return settings.callMode === "proxy" ? "/proxy/web" : null;
+  const configured = normalizeProxyUrl(settings.serviceProxyUrl || "");
+  if (configured) return `${configured}/proxy/web`;
+  // 自托管页面仍兼容原来的同源代理模式；GitHub Pages 上不存在动态路由。
+  if (settings.callMode === "proxy" && !location.hostname.endsWith("github.io")) return "/proxy/web";
+  return null;
+}
+
+function webProxyRequiredMessage(action) {
+  if (location.hostname.endsWith("github.io")) {
+    return `GitHub Pages 无法直接${action}。请填写上方“服务代理地址”，并运行或部署 web/proxy.py`;
+  }
+  return `浏览器直连${action}受 CORS 限制，请填写“服务代理地址”`;
 }
 
 async function webFetchUrl(url, settings) {
   // 1) 优先经同源代理（自托管 web/proxy.py 时可用，绕过 CORS）
   const base = webApiBase(settings);
   if (base) {
-    const resp = await fetch(`${base}/fetch?url=${encodeURIComponent(url)}`);
+    let resp;
+    try {
+      resp = await fetch(`${base}/fetch?url=${encodeURIComponent(url)}`);
+    } catch {
+      throw new Error("无法连接服务代理，请检查地址、代理进程及 CORS 配置");
+    }
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) throw new Error(data.error || `抓取失败 ${resp.status}`);
     return data;
   }
   // 2) 直连尝试（仅当目标网站允许 CORS 时可用，多数情况会被浏览器拦截）
-  const resp = await fetch(url, { method: "GET", mode: "cors" });
+  let resp;
+  try {
+    resp = await fetch(url, { method: "GET", mode: "cors" });
+  } catch {
+    throw new Error(webProxyRequiredMessage("抓取网页"));
+  }
   if (!resp.ok) throw new Error(`网页请求失败 ${resp.status}`);
   const html = await resp.text();
   const doc = new DOMParser().parseFromString(html, "text/html");
@@ -1132,11 +1174,16 @@ async function webSearch(query, settings) {
   const provider = settings.webProvider || "duckduckgo";
   const base = webApiBase(settings);
   if (base) {
-    const resp = await fetch(`${base}/search`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query, provider, api_key: settings.webTavilyKey || "", max_results: 6 }),
-    });
+    let resp;
+    try {
+      resp = await fetch(`${base}/search`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query, provider, api_key: settings.webTavilyKey || "", max_results: 6 }),
+      });
+    } catch {
+      throw new Error("无法连接服务代理，请检查地址、代理进程及 CORS 配置");
+    }
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) throw new Error(data.error || `搜索失败 ${resp.status}`);
     return data.results || [];
@@ -1152,7 +1199,49 @@ async function webSearch(query, settings) {
     if (!resp.ok) throw new Error(data.error || `搜索失败 ${resp.status}`);
     return (data.results || []).map((r) => ({ title: r.title, url: r.url, snippet: r.content || "" }));
   }
-  throw new Error("直连模式搜索需要服务支持 CORS，请改用「同源代理」模式（自托管 web/proxy.py）");
+  throw new Error(webProxyRequiredMessage("搜索 DuckDuckGo"));
+}
+
+function syncWebProxyStatus(message = "", tone = "") {
+  const status = $("webProxyStatus");
+  if (!status) return;
+  status.classList.remove("ok", "error");
+  if (tone) status.classList.add(tone);
+  if (message) {
+    status.textContent = message;
+    return;
+  }
+  const value = $("serviceProxyUrl").value.trim();
+  status.textContent = value
+    ? "代理地址已填写；点击“保存并检测”确认连接。"
+    : "Web 搜索、网页抓取和 MinerU 可共用此代理；本机测试可填 http://127.0.0.1:8000。";
+}
+
+async function saveAndTestServiceProxy() {
+  const settings = collectSettings();
+  let proxy;
+  try {
+    proxy = normalizeProxyUrl(settings.serviceProxyUrl || "");
+    if (!proxy) throw new Error("请先填写服务代理地址");
+  } catch (e) {
+    syncWebProxyStatus(e.message, "error");
+    $("serviceProxyUrl").focus();
+    return;
+  }
+  Settings.save(settings);
+  syncWebProxyStatus("正在检测代理连接…");
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    const resp = await fetch(`${proxy}/proxy/health`, { signal: controller.signal });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    syncWebProxyStatus("代理连接正常，Web 搜索与网页抓取已启用。", "ok");
+  } catch (e) {
+    const detail = e.name === "AbortError" ? "连接超时" : e.message;
+    syncWebProxyStatus(`地址已保存，但检测失败：${detail}。请确认代理已启动并允许本站跨域访问。`, "error");
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function renderWebResults(results, settings) {
@@ -2421,6 +2510,8 @@ function bindEvents() {
 
   // Web 搜索与抓取（知识库）
   $("webProvider").addEventListener("change", syncWebProviderUI);
+  $("serviceProxyUrl").addEventListener("input", () => syncWebProxyStatus());
+  $("saveServiceProxy").addEventListener("click", saveAndTestServiceProxy);
   $("webSearchBtn").addEventListener("click", handleWebSearch);
   $("webSearchQuery").addEventListener("keydown", (e) => {
     if (e.key === "Enter") {

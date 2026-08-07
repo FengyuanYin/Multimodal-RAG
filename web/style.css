@@ -1081,6 +1081,23 @@ select option { background: #121a33; color: var(--text); }
 .web-panel h3 { margin: 0 0 6px; font-size: 15px; }
 .web-panel .hint { margin: 0 0 12px; }
 
+.web-proxy-row {
+  display: grid;
+  grid-template-columns: auto minmax(220px, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(99, 102, 241, 0.22);
+  border-radius: 10px;
+  background: rgba(99, 102, 241, 0.06);
+}
+.web-proxy-row label { color: var(--text); font-size: 12px; font-weight: 650; }
+.web-proxy-row input { height: 38px; min-width: 0; }
+.web-proxy-save { width: auto; height: 38px; white-space: nowrap; }
+.web-proxy-status { margin: 7px 2px 2px; color: var(--muted); font-size: 11.5px; line-height: 1.45; }
+.web-proxy-status.ok { color: #6ee7b7; }
+.web-proxy-status.error { color: #fda4af; }
+
 /* 搜索行：控件等高对齐 */
 .web-search-row {
   display: flex;
@@ -1268,6 +1285,8 @@ select option { background: #121a33; color: var(--text); }
 
 /* ── 响应式 ── */
 @media (max-width: 700px) {
+  .web-proxy-row { grid-template-columns: 1fr; }
+  .web-proxy-save { width: 100%; }
   .web-search-row,
   .web-url-row {
     flex-wrap: wrap;

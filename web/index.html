@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Multimodal RAG · 本地知识工作台</title>
   <meta name="description" content="运行于 GitHub Pages 的本地优先多模态 RAG 工作台，支持 PDF、网页、图表引用与可解释检索。" />
-  <link rel="stylesheet" href="style.css?v=7" />
+  <link rel="stylesheet" href="style.css?v=8" />
   <script src="./vendor/pdfjs/pdf.min.js"></script>
   <script>
     // pdf.js 使用限制（必须设置 workerSrc 才能解析 PDF）
@@ -248,7 +248,7 @@
                   <input type="text" id="mineruProxyUrl" placeholder="https://your-proxy.example.com" inputmode="url" />
                   <p id="mineruProxyError" class="field-error hidden" role="alert"></p>
                 </div>
-                <p class="hint">GitHub Pages 无法跨域直连 MinerU。请部署仓库中的 <code>web/proxy.py</code> 并填写 HTTPS 地址；本机测试可填 <code>http://127.0.0.1:8000</code>。API Key 仅随解析请求发送给该代理。</p>
+                <p class="hint">留空时使用知识库页面中的“服务代理地址”。GitHub Pages 无法跨域直连 MinerU；API Key 仅随解析请求发送给你配置的代理。</p>
               </div>
 
               <div class="field hidden" id="mineruSelfConfig">
@@ -328,7 +328,14 @@
             <!-- ══ Web 搜索与抓取 ══ -->
             <div class="web-panel">
               <h3>Web 搜索与抓取</h3>
-              <p class="hint">搜索互联网或直接粘贴网址，把网页正文抓取进知识库。直连模式受浏览器 CORS 限制，建议使用「同源代理」模式（自托管 web/proxy.py）。</p>
+              <p class="hint">搜索互联网或直接粘贴网址，把网页正文抓取进知识库。GitHub Pages 无法直接访问搜索服务，请连接已部署的 <code>web/proxy.py</code>。</p>
+
+              <div class="web-proxy-row">
+                <label for="serviceProxyUrl">服务代理地址</label>
+                <input type="text" id="serviceProxyUrl" placeholder="https://your-proxy.example.com" inputmode="url" autocomplete="url" />
+                <button id="saveServiceProxy" class="btn ghost web-proxy-save" type="button">保存并检测</button>
+              </div>
+              <p id="webProxyStatus" class="web-proxy-status" role="status" aria-live="polite">Web 搜索、网页抓取和 MinerU 可共用此代理；本机测试可填 http://127.0.0.1:8000。</p>
 
               <div class="web-search-row">
                 <label class="sr-only" for="webProvider">搜索服务提供商</label>
@@ -460,6 +467,6 @@
   </div>
 
   <div id="liveRegion" class="sr-only" aria-live="polite" aria-atomic="true"></div>
-  <script type="module" src="app.js?v=14"></script>
+  <script type="module" src="app.js?v=15"></script>
 </body>
 </html>

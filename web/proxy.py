@@ -21,6 +21,7 @@ import asyncio
 import base64
 import io
 import ipaddress
+import inspect
 import json
 import mimetypes
 import os
@@ -36,13 +37,15 @@ _ALLOWED_ORIGINS = [item.strip() for item in os.getenv(
     "AGR_PROXY_ALLOWED_ORIGINS",
     "https://fengyuanyin.github.io,http://localhost:8000,http://127.0.0.1:8000",
 ).split(",") if item.strip()]
-app.add_middleware(
-    CORSMiddleware,
+_CORS_OPTIONS = dict(
     allow_origins=_ALLOWED_ORIGINS,
     allow_credentials=False,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Content-Type", "X-API-Key", "X-File-Name"],
 )
+if "allow_private_network" in inspect.signature(CORSMiddleware).parameters:
+    _CORS_OPTIONS["allow_private_network"] = True
+app.add_middleware(CORSMiddleware, **_CORS_OPTIONS)
 
 
 @app.middleware("http")
