@@ -406,6 +406,13 @@ def _mineru_message(payload: dict, fallback: str) -> str:
     return message[:300]
 
 
+def _mineru_transport_error(stage: str, exc: httpx.HTTPError) -> str:
+    """Return an actionable error without exposing signed URLs or credentials."""
+    if isinstance(exc, httpx.TimeoutException):
+        return f"{stage}超时，请稍后重试"
+    return f"{stage}网络请求失败（{type(exc).__name__}）"
+
+
 async def _read_limited(response: httpx.Response, limit: int) -> bytes:
     chunks = []
     total = 0
@@ -511,18 +518,22 @@ async def proxy_mineru_parse(request: Request):
 
     auth = {"Authorization": f"Bearer {api_key}"}
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0)) as client:
-            create = await client.post(
-                f"{_MINERU_API_BASE}/file-urls/batch",
-                headers=auth,
-                json={
-                    "files": [{"name": filename, "data_id": os.urandom(12).hex()}],
-                    "model_version": "vlm",
-                    "enable_formula": True,
-                    "enable_table": True,
-                    "language": "ch",
-                },
-            )
+        timeout = httpx.Timeout(connect=15.0, read=120.0, write=120.0, pool=15.0)
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            try:
+                create = await client.post(
+                    f"{_MINERU_API_BASE}/file-urls/batch",
+                    headers=auth,
+                    json={
+                        "files": [{"name": filename, "data_id": os.urandom(12).hex()}],
+                        "model_version": "vlm",
+                        "enable_formula": True,
+                        "enable_table": True,
+                        "language": "ch",
+                    },
+                )
+            except httpx.HTTPError as exc:
+                return JSONResponse({"error": _mineru_transport_error("MinerU 创建任务", exc)}, status_code=502)
             create_payload = create.json() if create.content else {}
             if create.status_code >= 400 or create_payload.get("code") not in (None, 0):
                 return JSONResponse({"error": _mineru_message(create_payload, "MinerU 创建上传任务失败")}, status_code=502)
@@ -532,15 +543,27 @@ async def proxy_mineru_parse(request: Request):
             if not batch_id or not upload_urls:
                 return JSONResponse({"error": "MinerU 未返回 batch_id 或上传地址"}, status_code=502)
 
-            upload = await client.put(upload_urls[0], content=body)
+            try:
+                upload = await client.put(upload_urls[0], content=body)
+            except httpx.HTTPError as exc:
+                return JSONResponse({"error": _mineru_transport_error("上传 PDF 到 MinerU", exc)}, status_code=502)
             if upload.status_code >= 400:
                 return JSONResponse({"error": f"上传 PDF 到 MinerU 存储失败（HTTP {upload.status_code}）"}, status_code=502)
 
             deadline = asyncio.get_running_loop().time() + 300
             result_item = None
+            poll_failures = 0
             while asyncio.get_running_loop().time() < deadline:
                 await asyncio.sleep(2)
-                status = await client.get(f"{_MINERU_API_BASE}/extract-results/batch/{batch_id}", headers=auth)
+                try:
+                    status = await client.get(f"{_MINERU_API_BASE}/extract-results/batch/{batch_id}", headers=auth)
+                    poll_failures = 0
+                except httpx.HTTPError as exc:
+                    poll_failures += 1
+                    if poll_failures >= 3:
+                        return JSONResponse({"error": _mineru_transport_error("查询 MinerU 解析状态", exc)}, status_code=502)
+                    await asyncio.sleep(min(2 ** poll_failures, 5))
+                    continue
                 status_payload = status.json() if status.content else {}
                 if status.status_code >= 400 or status_payload.get("code") not in (None, 0):
                     return JSONResponse({"error": _mineru_message(status_payload, "MinerU 查询解析状态失败")}, status_code=502)
@@ -557,14 +580,32 @@ async def proxy_mineru_parse(request: Request):
             archive_url = (result_item or {}).get("full_zip_url")
             if not archive_url:
                 return JSONResponse({"error": "MinerU 已完成但未返回结果下载地址"}, status_code=502)
-            async with client.stream("GET", archive_url) as archive_response:
-                archive_response.raise_for_status()
-                archive = await _read_limited(archive_response, _MAX_MINERU_ARCHIVE_BYTES)
+            archive = None
+            download_error = None
+            for attempt in range(3):
+                try:
+                    async with client.stream("GET", archive_url) as archive_response:
+                        if archive_response.status_code >= 400:
+                            return JSONResponse(
+                                {"error": f"下载 MinerU 结果失败（HTTP {archive_response.status_code}）"},
+                                status_code=502,
+                            )
+                        archive = await _read_limited(archive_response, _MAX_MINERU_ARCHIVE_BYTES)
+                    break
+                except httpx.HTTPError as exc:
+                    download_error = exc
+                    if attempt < 2:
+                        await asyncio.sleep(2 ** attempt)
+            if archive is None:
+                return JSONResponse(
+                    {"error": _mineru_transport_error("下载 MinerU 结果", download_error)},
+                    status_code=502,
+                )
         return JSONResponse(_extract_mineru_archive(archive))
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=422)
-    except (httpx.HTTPError, zipfile.BadZipFile):
-        return JSONResponse({"error": "MinerU 上游请求或结果下载失败"}, status_code=502)
+    except httpx.HTTPError as exc:
+        return JSONResponse({"error": _mineru_transport_error("MinerU 上游请求", exc)}, status_code=502)
 
 
 @app.get("/proxy/health")

@@ -15,6 +15,7 @@ It can be used either as a **Python package** (`import agentic_rag`) or as a **F
 
 - [Key Features](#key-features)
 - [Web App: Browser-local PDF Chat](#web-app-browser-local-pdf-chat)
+- [GitHub Pages Proxy Setup](#github-pages-proxy-setup-web-search-and-mineru)
 - [Environment Requirements](#environment-requirements)
 - [Installation](#installation)
 - [Quick Start (import and go)](#quick-start-import-and-go)
@@ -46,26 +47,104 @@ It can be used either as a **Python package** (`import agentic_rag`) or as a **F
 
 ## Web App: Browser-local PDF Chat
 
-The `web/` folder is a **pure front-end** PDF Q&A tool (BYOK — Bring Your Own Key): upload PDFs, or **search the web / paste URLs to grab web pages into your knowledge base**, build a local index (BM25 + optional embeddings), and chat with citations. Documents and keys never leave the browser (except when you explicitly choose the MinerU parser or the self-hosted proxy for web fetching).
+The `web/` folder is a **browser-local** PDF Q&A tool (BYOK — Bring Your Own Key): upload PDFs, or **search the web / paste URLs to grab web pages into your knowledge base**, build a local index (BM25 + optional embeddings), and chat with citations. Documents stay in the browser unless you explicitly choose the MinerU parser; API keys are kept in browser session storage and are sent only to the endpoints you configure.
 
 See [web/README.md](web/README.md) for details.
 
-A **pure front-end** PDF QA page lives in [`web/`](web/README.md). Visitors can:
+A static browser-local PDF QA page lives in [`web/`](web/README.md). Visitors can:
 
 1. Upload their own PDFs (parsed entirely in the browser — nothing is uploaded to any server)
-2. **Search the web / paste URLs to grab web pages into the knowledge base** (via the optional same-origin proxy; DuckDuckGo free search or Tavily)
-3. Bring their own API Key and LLM configuration (Key stays in `localStorage`, only sent to the API endpoint they configured)
+2. **Search the web / paste URLs to grab web pages into the knowledge base** (via the optional service proxy; DuckDuckGo free search or Tavily)
+3. Bring their own API Key and LLM configuration (secrets stay in `sessionStorage` and are sent only to the configured endpoint)
 4. Build a local index (BM25 keyword search by default; optional Embedding API for vector-enhanced retrieval)
 5. Ask questions against their documents, with cited sources
 
-**Deploy it to GitHub Pages in minutes** — no backend needed:
+**Deploy the static interface to GitHub Pages in minutes:**
 
 - Repository Settings → Pages → Source: `Deploy from a branch`
 - Branch: `main`, directory: `/web` → Save
 - Open `https://<username>.github.io/<repo>/web/`
 
-> If your LLM provider does not support browser CORS, self-host the optional same-origin proxy: `python -m uvicorn web.proxy:app --host 0.0.0.0 --port 8000`.
-> Web search & page fetching also go through this proxy (`/proxy/web/search`, `/proxy/web/fetch`), since most websites block browser CORS.
+Local PDF parsing and BM25 retrieval need no backend. Web search, page fetching, MinerU, and LLM providers without browser CORS require the proxy described below.
+
+---
+
+## GitHub Pages Proxy Setup (Web Search and MinerU)
+
+GitHub Pages serves static files only; it cannot run [`web/proxy.py`](web/proxy.py). To use Web Search or the official MinerU API from the hosted interface, deploy the proxy as a separate public HTTPS service and enter that service URL in the web app.
+
+```text
+GitHub Pages UI
+      │ HTTPS
+      ▼
+web/proxy.py (Render or another Python host)
+      ├── DuckDuckGo / Tavily search and page fetching
+      └── MinerU official API
+```
+
+### Option A: Run the proxy locally
+
+From the repository root:
+
+```bash
+pip install -r requirements.txt
+python -m uvicorn web.proxy:app --host 127.0.0.1 --port 8000
+```
+
+Open `http://127.0.0.1:8000/proxy/health`. A healthy proxy returns:
+
+```json
+{"status":"ok"}
+```
+
+In the GitHub Pages app, open **Knowledge Base → Web Search & Fetch**, enter `http://127.0.0.1:8000` as the **Service Proxy URL**, then select **Save and Test**. This local address works only for the user running the proxy on the same computer.
+
+### Option B: Deploy the proxy to Render
+
+1. Sign in to [Render](https://render.com/) and create a **Web Service** from this GitHub repository.
+2. Select the `main` branch and the Python runtime.
+3. Use the following commands:
+
+   ```text
+   Build Command: pip install -r requirements.txt
+   Start Command: uvicorn web.proxy:app --host 0.0.0.0 --port $PORT
+   ```
+
+4. Add this environment variable:
+
+   ```text
+   AGR_PROXY_ALLOWED_ORIGINS=https://fengyuanyin.github.io
+   ```
+
+5. Deploy, then verify `https://<your-service>.onrender.com/proxy/health`.
+6. In the web app, set **Service Proxy URL** to `https://<your-service>.onrender.com`. Do not append `/proxy` or an endpoint path.
+
+The same commands work on other Python hosting platforms. Production deployments must use HTTPS.
+
+### Enable Web Search and page fetching
+
+After the proxy health check succeeds:
+
+- **DuckDuckGo** requires no API key.
+- **Tavily** requires a Tavily API key entered in the Knowledge Base panel.
+- Pasted URLs and selected search results are fetched through `/proxy/web/fetch` and added to the browser-local knowledge base.
+
+### Enable MinerU
+
+1. Open **Settings** and select **MinerU → Official API** as the parser.
+2. Enter a valid MinerU API key.
+3. Leave **MinerU Proxy URL** empty to reuse the shared Service Proxy URL, or enter a separate trusted proxy URL.
+4. Save the settings and upload the PDF again.
+
+The browser sends the PDF and MinerU key to your configured proxy. The proxy creates an official MinerU batch job, uploads the PDF, polls the job, downloads the result archive, and returns normalized pages and media to the browser. The proxy does not persist API keys or uploaded files.
+
+### Security and troubleshooting
+
+- Never commit API keys. Revoke any key that has appeared in a screenshot, chat, issue, or commit.
+- Only use a proxy you control and trust. A publicly reachable proxy should be protected with authentication, rate limiting, request-size limits, HTTPS, and monitoring before production use.
+- `Failed to fetch` usually means the proxy URL is wrong, the service is asleep or unavailable, HTTPS/CORS is misconfigured, or a browser private-network request was denied.
+- A MinerU stage-specific error now identifies whether task creation, PDF upload, status polling, result download, or archive parsing failed. Retry transient timeout errors; verify the MinerU key and account quota for repeated authorization or quota failures.
+- Some free hosting plans sleep when idle. The first request after wake-up may take longer than usual, and complex MinerU documents can take several minutes.
 
 ---
 
