@@ -59,6 +59,23 @@ A static browser-local PDF QA page lives in [`web/`](web/README.md). Visitors ca
 4. Build a local index (BM25 keyword search by default; optional Embedding API for vector-enhanced retrieval)
 5. Ask questions against their documents, with cited sources
 
+### Chat routing: direct by default, `/s` for knowledge search
+
+The chat input uses explicit per-message routing:
+
+- Enter a normal message to chat directly with the configured LLM. The document knowledge base is not searched and no document citations are added.
+- Prefix a message with the exact, lowercase `/s` command to search the selected knowledge-base scope. The command is removed before retrieval and generation, while the original message remains visible in conversation history.
+
+```text
+Explain retrieval-augmented generation.
+# Direct LLM chat; uploaded documents are not searched.
+
+/s Summarize the main conclusions of this paper.
+# Searches the knowledge base, then answers with document citations.
+```
+
+`/s` is case-sensitive and must be a complete first token after optional leading whitespace. `/search topic`, `/S topic`, and `/sTopic` are ordinary direct-chat messages. Sending `/s` without a question displays a validation prompt and makes no LLM or retrieval request. Conversation history and enabled user memory remain available in both routes; keyword, vector, hybrid, and multimodal retrieval settings apply only to `/s` requests.
+
 **Deploy the static interface to GitHub Pages in minutes:**
 
 - Repository Settings → Pages → Source: `Deploy from a branch`

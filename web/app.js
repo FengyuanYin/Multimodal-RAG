@@ -6,7 +6,7 @@
  *      （除非用户显式选择 MinerU 服务解析器，此时 PDF 会发送到其自配服务）。
  *   2. API Key 仅保存在浏览器 localStorage，仅发送到用户自配的 API 地址。
  *   3. 检索默认使用本地 BM25（中文 bigram 分词），可选 Embedding API 增强。
- *   4. 支持文档分类管理、按分类检索、无需检索问题直接回答。
+ *   4. 默认直接与 LLM 对话；仅以 /s 开头的问题检索知识库。
  * ========================================================================= */
 "use strict";
 
@@ -677,19 +677,20 @@ function buildChunks(docs, chunkSize) {
   return chunks;
 }
 
-/* ───────────────────────── 无需检索判断 ───────────────────────── */
-function isDirectAnswerable(q) {
-  const t = q.trim().toLowerCase();
-  if (t.length < 2) return false;
-  // 问候 / 感谢 / 自我介绍 / 告别 / 简单能力询问
-  const patterns = [
-    /^(你好|您好|hi|hello|hey|嗨|哈喽|早上好|晚上好|下午好)[!！。.\s]*$/,
-    /^(谢谢|感谢|多谢|thanks|thank you|thx)[!！。.\s]*$/i,
-    /^(再见|拜拜|bye|goodbye)[!！。.\s]*$/i,
-    /^(你是谁|你是什么|介绍一下你自己|介绍下你自己|what are you|who are you)/i,
-    /^(你能做什么|你能干什么|你会什么|可以做什么|what can you do)/i,
-  ];
-  return patterns.some((re) => re.test(t));
+/* ───────────────────────── 对话路由（默认直聊，/s 显式检索） ───────────────────────── */
+function parseChatRoute(input) {
+  const original = String(input || "").trim();
+  const command = /^\/s(?:\s+|$)/.exec(original);
+  if (!command) {
+    return { mode: "direct", original, query: original, error: "" };
+  }
+  const query = original.slice(command[0].length).trim();
+  return {
+    mode: "knowledge",
+    original,
+    query,
+    error: query ? "" : "请在 /s 后输入要检索的知识库问题，例如：/s 总结这篇论文的主要结论",
+  };
 }
 
 /* ───────────────────────── 对话（OpenAI 兼容） ───────────────────────── */
@@ -1570,15 +1571,15 @@ function renderActiveConvInfo() {
   if (!info) return;
   const conv = currentConv();
   info.textContent = conv
-    ? `当前会话：${conv.title || "新对话"}${conv.messages ? ` · ${conv.messages.length} 条消息` : ""}`
-    : "选择检索范围，基于文档提问";
+    ? `当前会话：${conv.title || "新对话"}${conv.messages ? ` · ${conv.messages.length} 条消息` : ""} · /s 检索知识库`
+    : "默认直接对话 · 输入 /s 问题检索知识库";
 }
 
 function renderMessagesFromConv(conv) {
   const box = $("messages");
   box.innerHTML = "";
   if (!conv || !conv.messages.length) {
-    addMessage("system", "上传 PDF 并建立索引后，即可基于文档提问。无需检索的问题会直接回答。");
+    addMessage("system", "直接输入即可与 LLM 对话；需要查询已上传文档时，请输入 /s 问题，例如：/s 总结这篇论文。");
     return;
   }
   for (const m of conv.messages) {
@@ -2147,6 +2148,12 @@ async function handleBuildIndex() {
 
 /* ───────────────────────── 提问处理 ───────────────────────── */
 async function handleAsk(question) {
+  const route = parseChatRoute(question);
+  if (route.error) {
+    addMessage("system", route.error);
+    return;
+  }
+
   const settings = collectSettings();
   if (!settings.apiKey) {
     addMessage("error", "请先在「设置」中填写 API Key。");
@@ -2161,8 +2168,10 @@ async function handleAsk(question) {
   let conv = currentConv();
   if (!conv) conv = newConversation();
 
-  addMessage("user", question);
-  pushConvMessage("user", question);
+  // 在记录当前问题之前截取历史，避免把本轮 user 消息重复发送给 LLM。
+  const history = getHistoryForPrompt(settings);
+  addMessage("user", route.original);
+  pushConvMessage("user", route.original);
   const thinking = addMessage("assistant", "思考中…");
   const streamView = streamIntoMessage(thinking);
   const controller = new AbortController();
@@ -2170,38 +2179,37 @@ async function handleAsk(question) {
   setGenerationUI(true);
 
   try {
-    // 第 1 层：短期记忆（最近 N 轮）
-    const history = getHistoryForPrompt(settings);
-
     // 第 3 层：长期记忆注入 system
     let memoryBlock = "";
     if (settings.enableMemory && State.memories.length) {
       const lines = State.memories.map((m, i) => `${i + 1}. ${m.content}`).join("\n");
-      memoryBlock = `\n\n【关于用户的长期记忆】\n${lines}\n（仅作参考，若与文档信息冲突以文档为准）`;
+      memoryBlock = `\n\n【关于用户的长期记忆】\n${lines}\n（仅在相关时参考，不要泄露或臆测用户信息）`;
     }
 
-    // 1. 无需检索的问题：直接回答，并明确告知未使用检索
-    if (isDirectAnswerable(question)) {
+    // 1. 默认直接与 LLM 对话；只有显式 /s 命令才进入文档检索。
+    if (route.mode === "direct") {
       const system =
-        "你是一个友好、简洁的 AI 助手。用户问的是问候或自我介绍类问题，不需要检索文档，请直接、简短地回答（1-3 句话）。" +
+        "你是一个友好、准确的 AI 助手。请直接回答用户问题。本次未检索已上传的知识库文档，因此不要声称答案来自知识库或提供虚构的文档引用。" +
         memoryBlock;
-      const answer = await askLLM(settings, system, question, history, {
+      const answer = await askLLM(settings, system, route.query, history, {
         signal: controller.signal,
         onDelta: (delta) => streamView.append(delta),
       });
       streamView.flush();
       thinking.className = "msg assistant";
-      const chip = el("span", "chip no-retrieval", "⚡ 未使用检索 · 直接回答");
+      const chip = el("span", "chip no-retrieval", "⚡ 直接对话 · 未检索知识库");
       thinking.appendChild(el("div", "meta")).appendChild(chip);
       pushConvMessage("assistant", answer, [chip.textContent]);
       renderMemories();
-      extractMemories(question, answer, settings); // 第 3 层：后台提取记忆
+      extractMemories(route.query, answer, settings); // 第 3 层：后台提取记忆
       return;
     }
 
-    // 2. 需要检索：检查索引
+    const knowledgeQuestion = route.query;
+
+    // 2. /s 显式检索：检查索引
     if (!State.chunks.length) {
-      thinking.textContent = "尚未建立索引。请先到「文档」页上传 PDF 并建立索引。";
+      thinking.textContent = "尚未建立知识库索引。请先到「知识库」页添加文档并建立索引，或移除 /s 直接与 LLM 对话。";
       thinking.className = "msg error";
       return;
     }
@@ -2210,13 +2218,13 @@ async function handleAsk(question) {
     const filter = chatCatFilter();
     const scopeSel = $("chatCat");
     const scopeName = (scopeSel.selectedOptions && scopeSel.selectedOptions[0] && scopeSel.selectedOptions[0].text) || "全部文档";
-    const qTokens = tokenize(question);
+    const qTokens = tokenize(knowledgeQuestion);
     const bm25Hits = State.bm25 ? State.bm25.search(qTokens, settings.topK * 2, filter) : [];
 
     const wantVector = settings.retrievalMode === "vector" || settings.retrievalMode === "hybrid";
     let vectorHits = [];
     if (wantVector && State.vectors && settings.embedModel) {
-      const [qvec] = await embedTexts([question], settings);
+      const [qvec] = await embedTexts([knowledgeQuestion], settings);
       vectorHits = vectorSearch(qvec, State, settings.topK * 2, filter);
     }
 
@@ -2281,7 +2289,7 @@ async function handleAsk(question) {
     }
 
     // 第 4 层：检索式记忆（从历史与长期记忆中检索相关片段）
-    const memHits = memorySearch(question, settings);
+    const memHits = memorySearch(knowledgeQuestion, settings);
     let memContext = "";
     if (memHits.length) {
       memContext = "\n\n【相关历史对话】\n" + memHits.map((t) => "- " + t).join("\n");
@@ -2297,7 +2305,7 @@ async function handleAsk(question) {
       memoryBlock;
 
     const userContent =
-      `参考片段：\n${context}${mediaBlock}${memContext}\n\n用户问题：${question}`;
+      `参考片段：\n${context}${mediaBlock}${memContext}\n\n用户问题：${knowledgeQuestion}`;
 
     const answer = await askLLM(settings, systemPrompt, userContent, history, {
       signal: controller.signal,
@@ -2347,7 +2355,7 @@ async function handleAsk(question) {
     // 保存回答到会话（第 2 层）
     pushConvMessage("assistant", answer, [meta.textContent || "assistant"]);
     renderMemories();
-    extractMemories(question, answer, settings); // 第 3 层：后台提取记忆
+    extractMemories(knowledgeQuestion, answer, settings); // 第 3 层：后台提取记忆
   } catch (e) {
     const partial = streamView.flush();
     if (e.name === "AbortError") {

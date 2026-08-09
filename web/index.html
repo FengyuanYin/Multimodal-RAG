@@ -408,7 +408,7 @@
         <div class="view-head chat-head">
           <div class="head-text">
           <h2>对话</h2>
-            <p id="activeConvInfo">选择检索范围，基于文档提问</p>
+            <p id="activeConvInfo">默认直接对话 · 输入 /s 问题检索知识库</p>
           </div>
           <div class="chat-filters">
             <button id="newConvTop" class="btn small ghost" type="button" title="新建会话">＋ 新建</button>
@@ -425,15 +425,15 @@
         <div class="view-body chat-body">
           <div class="chat-main">
             <div id="messages" class="messages">
-              <div class="msg system">上传 PDF 并建立索引后，即可基于文档提问。检索过程会保留来源、页码和降级状态。</div>
+              <div class="msg system">直接输入即可与 LLM 对话；查询已上传文档请使用 /s 问题，检索回答会保留来源与页码。</div>
             </div>
             <form id="chatForm" class="chat-form">
               <div class="composer-status" aria-live="polite">
                 <span class="stream-indicator" id="streamStatus"><span aria-hidden="true"></span><span id="streamStatusText">流式响应已就绪</span></span>
-                <span class="composer-hint">Enter 发送 · Shift + Enter 换行</span>
+                <span class="composer-hint">/s 检索知识库 · Enter 发送 · Shift + Enter 换行</span>
               </div>
               <div class="input-wrap">
-                <textarea id="question" rows="1" placeholder="向知识库提问，回答将实时呈现…" aria-describedby="questionHint"></textarea>
+                <textarea id="question" rows="1" placeholder="直接与 LLM 对话；输入 /s 问题检索知识库…" aria-describedby="questionHint"></textarea>
                 <button type="button" class="btn stop-btn hidden" id="stopBtn" aria-label="停止生成"><span aria-hidden="true"></span>停止</button>
                 <button type="submit" class="btn primary send-btn" id="askBtn" aria-label="发送">
                   <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -442,7 +442,7 @@
                   </svg>
                 </button>
               </div>
-              <span id="questionHint" class="sr-only">按 Enter 发送，按 Shift 加 Enter 换行</span>
+              <span id="questionHint" class="sr-only">直接输入与 LLM 对话；以 /s 空格问题开头检索知识库。按 Enter 发送，按 Shift 加 Enter 换行</span>
             </form>
           </div>
         </div>
@@ -467,6 +467,6 @@
   </div>
 
   <div id="liveRegion" class="sr-only" aria-live="polite" aria-atomic="true"></div>
-  <script type="module" src="app.js?v=15"></script>
+  <script type="module" src="app.js?v=16"></script>
 </body>
 </html>
