@@ -1,8 +1,8 @@
 # Agentic GraphRAG 系统
 
-## AutoMemory 本地 TUI
+## AutoMemory 终端 CLI 与 Windows EXE
 
-AutoMemory 是额外提供的本地终端界面，不替换也不改变现有 Web 页面、REST API 或 Python 包。它包含五个工作区：对话、知识库、评估、设置和帮助/诊断，并且不要求启动 FastAPI。
+AutoMemory 是额外提供的单终端、逐行交互程序，使用体验接近 Claude Code。它不替换、不修改现有 Web 页面、REST API 或 Python 包。所有 AI 模型均通过云 API 调用，不运行本地模型。
 
 ### 安装与启动
 
@@ -17,22 +17,28 @@ python -m venv .venv
 # macOS / Linux
 source .venv/bin/activate
 
-pip install -e ".[tui]"
+pip install -e ".[cli]"
 automemory
 ```
 
-也可以执行 `python -m agentic_rag.tui`。通过绝对路径环境变量 `AUTOMEMORY_HOME` 或 `automemory --home <绝对路径>` 指定数据目录。会话、记忆、知识库、媒体、导出、缓存和日志都存放在这个隔离目录，不会复用或修改 Web 页面的浏览器数据。
+也可以执行 `python -m agentic_rag.cli`。Windows 用户可在 GitHub Actions 的 **Build AutoMemory Windows EXE** 最新运行记录中下载 `AutoMemory-windows-x64` 构建产物，解压后直接在 PowerShell 或 CMD 中运行 `AutoMemory.exe`，无需安装 Python。
 
-### 对话与快捷键
+若要在本机使用 Python 3.11 构建，执行 `powershell -ExecutionPolicy Bypass -File .\packaging\build_windows.ps1`，输出文件为 `dist\AutoMemory.exe`。
 
-- `1`–`5`：切换对话、知识库、评估、设置和帮助工作区。
-- `Ctrl+Enter`：发送；`Esc`：请求取消；`Ctrl+Q`：退出。
-- “直接对话”不会检索知识库；“知识库 RAG”只检索选定分类并保留来源元数据。
-- 可在设置中选择关键词、向量、混合或多模态检索。未显式配置嵌入模型时默认只启用轻量关键词检索。
+通过绝对路径环境变量 `AUTOMEMORY_HOME` 或 `automemory --home <绝对路径>` 指定数据目录；默认目录为 `%APPDATA%\AutoMemory`。会话、记忆、知识库、媒体、导出、缓存和日志均存放在这个隔离目录，不会复用或修改 Web 页面的浏览器数据。
+
+### 对话与命令
+
+- 普通输入默认直接调用云端 LLM，不检索知识库。
+- 只有消息以精确的 `/s` 前缀开头才检索知识库，例如：`/s 这篇论文的结论是什么？`
+- `/search <关键词>` 搜索网页，`/fetch <网址>` 抓取网页，`/mineru <PDF路径>` 调用云端 MinerU。
+- `/add`、`/docs`、`/sessions`、`/memory`、`/eval`、`/config`、`/secret`、`/diagnose` 和 `/help` 提供其余管理功能。
+- `Ctrl+C` 取消当前任务，`/exit` 或 EOF 退出。
+- 自动化调用可使用 `AutoMemory.exe -p "问题"`；回答写入 stdout，错误写入 stderr。
 
 ### 密钥安全
 
-在设置界面输入的密钥只保留在当前进程内，不写入 SQLite、日志或导出文件。建议使用当前终端的环境变量：
+执行 `/secret set llm_api_key`，在隐藏输入提示中填写密钥。Windows 下密钥保存到 Windows 凭据管理器，不写入 `config.json`、SQLite、日志或导出文件。环境变量优先级高于已保存凭据：
 
 ```powershell
 $env:AUTOMEMORY_LLM_API_KEY="..."
@@ -41,9 +47,7 @@ $env:AUTOMEMORY_TAVILY_API_KEY="..."
 automemory
 ```
 
-LLM 支持 OpenAI 兼容接口；模型名和不含凭据的 Base URL 可在设置中保存。MinerU 支持官方 API 和自托管端点。DuckDuckGo 搜索无需 Key，Tavily 需要对应环境变量。因为搜索、网页抓取和 MinerU 请求由本地 Python 进程执行，所以不受 GitHub Pages 浏览器 CORS 限制。
-
-本地嵌入与向量检索可安装 `pip install -e ".[tui,local-models,vector-db]"`；Excel 导入可安装 `pip install -e ".[tui,table]"`，普通 TUI 依赖已直接支持 CSV/TSV。
+LLM 支持 OpenAI 兼容接口；模型名和不含凭据的 Base URL 通过 `/config` 保存。嵌入、图片理解和重排序同样使用云 API；不配置嵌入 API 时仍可使用关键词检索。MinerU 支持官方 API 和自托管端点。DuckDuckGo 搜索无需 Key，Tavily 需要对应环境变量。搜索、网页抓取和 MinerU 请求由本地 EXE 发起，因此不受 GitHub Pages 浏览器 CORS 限制。
 
 知识库支持导入本地 PDF、文本/Markdown、图片和表格，以及搜索或抓取网页。评估数据集使用 JSON 数组，或包含 `cases` / `items` 的对象；每项至少提供 `query`，可通过 `expected` 文档 ID 和 `expected_media` 媒体 ID 计算 Precision@K、Recall@K、MRR、nDCG@K 与媒体召回率。评估结果只允许原子导出到 AutoMemory 的 exports 目录。
 

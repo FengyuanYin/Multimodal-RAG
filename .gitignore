@@ -9,6 +9,7 @@ dist/
 # ── 环境与配置 ──
 .env
 .venv/
+.venv-build/
 venv/
 agenticrag/
 
@@ -28,3 +29,5 @@ Thumbs.db
 
 # ── 工具运行目录 ──
 .autocode/
+.tmp-cli-smoke/
+.exe-smoke*/

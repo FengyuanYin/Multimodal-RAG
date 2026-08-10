@@ -7,9 +7,9 @@ An **Agentic GraphRAG** question-answering system built on **GraphRAG + Agentic 
 
 It can be used either as a **Python package** (`import agentic_rag`) or as a **FastAPI service** with a RESTful API.
 
-## AutoMemory local TUI
+## AutoMemory terminal CLI and Windows EXE
 
-AutoMemory is an additional local terminal interface. It does not replace or change the existing Web app, REST API, or Python package. Its five workspaces expose chat, knowledge management, retrieval evaluation, settings, and diagnostics without requiring FastAPI.
+AutoMemory is an additional, line-oriented terminal application inspired by coding assistants such as Claude Code. It does not replace or change the existing Web app, REST API, or Python package. It uses cloud APIs for every AI model; there is no local model runtime.
 
 ### Install and run
 
@@ -24,22 +24,28 @@ python -m venv .venv
 # macOS / Linux
 source .venv/bin/activate
 
-pip install -e ".[tui]"
+pip install -e ".[cli]"
 automemory
 ```
 
-You can also run `python -m agentic_rag.tui`. Set `AUTOMEMORY_HOME` to an absolute path to override the platform data directory, or pass `automemory --home <absolute-path>`. AutoMemory keeps its state, knowledge database, media, exports, cache, and logs under this isolated directory; it does not reuse or mutate the Web app's browser storage.
+You can also run `python -m agentic_rag.cli`. For Windows, download the `AutoMemory-windows-x64` artifact from the latest **Build AutoMemory Windows EXE** GitHub Actions run and start `AutoMemory.exe` in PowerShell or Command Prompt. The EXE is a single console program; no Python installation is required.
 
-### Chat and keyboard controls
+To build the EXE locally with Python 3.11, run `powershell -ExecutionPolicy Bypass -File .\packaging\build_windows.ps1`. The result is `dist\AutoMemory.exe`.
 
-- `1`–`5`: switch between Chat, Knowledge, Evaluation, Settings, and Help.
-- `Ctrl+Enter`: send a chat message; `Esc`: request cancellation; `Ctrl+Q`: quit.
-- **Direct chat** calls the configured LLM without knowledge retrieval.
-- **Knowledge RAG** retrieves only from the selected collection and produces grounded source metadata. Choose keyword, vector, hybrid, or multimodal retrieval in Settings.
+Set `AUTOMEMORY_HOME` to an absolute path or pass `--home <absolute-path>` to override `%APPDATA%\AutoMemory`. AutoMemory keeps its state, knowledge database, media, exports, cache, and logs in this isolated directory; it does not reuse or mutate the Web app's browser storage.
 
-### Runtime-only credentials
+### Chat and commands
 
-Keys entered in the Settings workspace remain in process memory and are never written to SQLite, logs, or exports. Environment variables are the recommended setup:
+- Type a normal message to call the configured cloud LLM directly, without searching the knowledge base.
+- Only a message beginning with the exact `/s` prefix enables local knowledge retrieval: `/s What does the paper conclude?`
+- `/search <keywords>` searches the Web; `/fetch <url>` captures a public page; `/mineru <pdf>` uses the cloud MinerU API.
+- `/add <path>`, `/docs`, `/sessions`, `/memory`, `/eval`, `/config`, `/secret`, `/diagnose`, and `/help` provide the remaining workflows.
+- `Ctrl+C` cancels active work. Use `/exit` or EOF to close the program.
+- For automation, `AutoMemory.exe -p "question"` writes the streamed answer to stdout and errors to stderr.
+
+### Secure cloud credentials
+
+Run `/secret set llm_api_key` and enter the key at the hidden prompt. On Windows it is stored by Windows Credential Manager, never in `config.json`, SQLite, logs, or exports. Environment variables override stored credentials:
 
 ```bash
 # OpenAI or another OpenAI-compatible LLM endpoint
@@ -50,13 +56,11 @@ export AUTOMEMORY_MINERU_API_KEY="..."
 export AUTOMEMORY_TAVILY_API_KEY="..."
 ```
 
-In PowerShell, use `$env:AUTOMEMORY_LLM_API_KEY="..."` for the current terminal session. Configure the model and credential-free Base URL in Settings. AutoMemory starts in keyword-only mode unless an embedding model is explicitly configured, so it remains usable on machines without GPU packages.
-
-For local embedding/vector search, install `pip install -e ".[tui,local-models,vector-db]"`. Excel ingestion additionally uses `pip install -e ".[tui,table]"`; CSV/TSV works with the regular TUI extra.
+In PowerShell, use `$env:AUTOMEMORY_LLM_API_KEY="..."` for the current terminal session. Configure model names and credential-free Base URLs with `/config`. Embeddings, image understanding, and reranking also use cloud API profiles. Keyword retrieval remains available without an embedding API.
 
 ### Knowledge sources and evaluation
 
-The Knowledge workspace imports local PDF, text/Markdown, image, and table files; captures readable Web pages; and parses PDFs through the official or a self-hosted MinerU service. DuckDuckGo search requires no key, while Tavily requires `AUTOMEMORY_TAVILY_API_KEY`. Network operations run locally and are not subject to GitHub Pages browser CORS restrictions. Public Web capture blocks private/reserved network targets; a self-hosted MinerU URL is allowed only when explicitly selected.
+The CLI imports local PDF, text/Markdown, image, and table files; captures readable Web pages; and parses PDFs through the official or a self-hosted MinerU service. DuckDuckGo search requires no key, while Tavily requires `AUTOMEMORY_TAVILY_API_KEY`. Requests run from the local EXE and are not subject to GitHub Pages browser CORS restrictions. Public Web capture blocks private/reserved network targets; a self-hosted MinerU URL is allowed only when explicitly selected.
 
 Evaluation datasets are JSON arrays (or an object with `cases` / `items`) containing at least a `query`. Optional `expected` document IDs and `expected_media` IDs enable Precision@K, Recall@K, MRR, nDCG@K, and media recall. Results are atomically exported inside AutoMemory's exports directory.
 
