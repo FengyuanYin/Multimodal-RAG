@@ -28,18 +28,26 @@ dependencies = [
 all = [
     "torch", "torchvision", "transformers", "sentence-transformers",
     "unstructured[pdf]", "chromadb", "qdrant-client",
-    "pillow", "pytesseract", "tabula-py", "camelot-py", "pandas",
+    "pillow", "pytesseract", "tabula-py", "camelot-py", "pandas", "openpyxl>=3.1",
+    "textual>=1.0", "platformdirs>=4.2", "beautifulsoup4>=4.12", "pymupdf>=1.24",
     "pytest", "pytest-asyncio",
 ]
+tui = ["textual>=1.0", "platformdirs>=4.2", "httpx>=0.27", "beautifulsoup4>=4.12", "pymupdf>=1.24"]
 local-models = ["torch", "torchvision", "transformers", "sentence-transformers"]
 pdf = ["unstructured[pdf]"]
 vector-db = ["chromadb", "qdrant-client"]
 image = ["pillow", "pytesseract"]
-table = ["tabula-py", "camelot-py", "pandas"]
+table = ["tabula-py", "camelot-py", "pandas", "openpyxl>=3.1"]
 dev = ["pytest", "pytest-asyncio"]
+
+[project.scripts]
+automemory = "agentic_rag.tui.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["agentic_rag*"]
+
+[tool.setuptools.package-data]
+agentic_rag = ["tui/*.tcss"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

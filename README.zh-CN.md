@@ -1,5 +1,52 @@
 # Agentic GraphRAG 系统
 
+## AutoMemory 本地 TUI
+
+AutoMemory 是额外提供的本地终端界面，不替换也不改变现有 Web 页面、REST API 或 Python 包。它包含五个工作区：对话、知识库、评估、设置和帮助/诊断，并且不要求启动 FastAPI。
+
+### 安装与启动
+
+```bash
+git clone https://github.com/FengyuanYin/Multimodal-RAG.git
+cd Multimodal-RAG
+python -m venv .venv
+
+# Windows PowerShell
+.venv\Scripts\Activate.ps1
+
+# macOS / Linux
+source .venv/bin/activate
+
+pip install -e ".[tui]"
+automemory
+```
+
+也可以执行 `python -m agentic_rag.tui`。通过绝对路径环境变量 `AUTOMEMORY_HOME` 或 `automemory --home <绝对路径>` 指定数据目录。会话、记忆、知识库、媒体、导出、缓存和日志都存放在这个隔离目录，不会复用或修改 Web 页面的浏览器数据。
+
+### 对话与快捷键
+
+- `1`–`5`：切换对话、知识库、评估、设置和帮助工作区。
+- `Ctrl+Enter`：发送；`Esc`：请求取消；`Ctrl+Q`：退出。
+- “直接对话”不会检索知识库；“知识库 RAG”只检索选定分类并保留来源元数据。
+- 可在设置中选择关键词、向量、混合或多模态检索。未显式配置嵌入模型时默认只启用轻量关键词检索。
+
+### 密钥安全
+
+在设置界面输入的密钥只保留在当前进程内，不写入 SQLite、日志或导出文件。建议使用当前终端的环境变量：
+
+```powershell
+$env:AUTOMEMORY_LLM_API_KEY="..."
+$env:AUTOMEMORY_MINERU_API_KEY="..."
+$env:AUTOMEMORY_TAVILY_API_KEY="..."
+automemory
+```
+
+LLM 支持 OpenAI 兼容接口；模型名和不含凭据的 Base URL 可在设置中保存。MinerU 支持官方 API 和自托管端点。DuckDuckGo 搜索无需 Key，Tavily 需要对应环境变量。因为搜索、网页抓取和 MinerU 请求由本地 Python 进程执行，所以不受 GitHub Pages 浏览器 CORS 限制。
+
+本地嵌入与向量检索可安装 `pip install -e ".[tui,local-models,vector-db]"`；Excel 导入可安装 `pip install -e ".[tui,table]"`，普通 TUI 依赖已直接支持 CSV/TSV。
+
+知识库支持导入本地 PDF、文本/Markdown、图片和表格，以及搜索或抓取网页。评估数据集使用 JSON 数组，或包含 `cases` / `items` 的对象；每项至少提供 `query`，可通过 `expected` 文档 ID 和 `expected_media` 媒体 ID 计算 Precision@K、Recall@K、MRR、nDCG@K 与媒体召回率。评估结果只允许原子导出到 AutoMemory 的 exports 目录。
+
 基于 **GraphRAG + Agentic RAG** 的智能问答系统。具备**混合路由机制**（根据用户提问自适应选择常规 RAG / GraphRAG / Hybrid），支持**多模态记忆输入**（文本、图片、表格、PDF），集成**高级 RAG 设计模式**（查询重写、混合检索、重排序）。既可作为 **Python 包** `import` 直接使用，也可作为 **FastAPI 服务**对外提供 RESTful API。
 
 ---
