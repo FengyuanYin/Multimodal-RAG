@@ -102,6 +102,19 @@ class MinerUClient:
             raise UpstreamError("Self-hosted MinerU returned neither ZIP nor valid JSON") from exc
         return self.normalize_payload(payload, path.name, "mineru_selfhosted")
 
+    def probe(self, cancel: CancellationToken, *, official: bool) -> bool:
+        """Probe without creating a parsing job; true means auth/health verified."""
+        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+        if official and not self.api_key:
+            raise ConfigurationError("MinerU API key is not configured")
+        if official:
+            url = f"{self.base_url}/extract-results/batch/automemory-connectivity-probe"
+            status = self.transport.probe_status("GET", url, headers=headers, cancel=cancel)
+            return status == 200
+        endpoint = validate_http_url(self.base_url, allow_private=self.allow_private)
+        status = self.transport.probe_status("GET", endpoint, headers=headers, cancel=cancel)
+        return status in {200, 204}
+
     def _download(self, url: str, cancel: CancellationToken) -> bytes:
         with self.transport.stream("GET", url, cancel=cancel) as response:
             chunks, total = [], 0

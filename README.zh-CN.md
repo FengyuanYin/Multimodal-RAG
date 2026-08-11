@@ -27,6 +27,23 @@ automemory
 
 通过绝对路径环境变量 `AUTOMEMORY_HOME` 或 `automemory --home <绝对路径>` 指定数据目录；默认目录为 `%APPDATA%\AutoMemory`。会话、记忆、知识库、媒体、导出、缓存和日志均存放在这个隔离目录，不会复用或修改 Web 页面的浏览器数据。
 
+交互启动时，支持 ANSI 的终端会显示六行紫色到青色渐变的 `AutoMemory` 艺术字；窄终端自动使用紧凑标题。`--no-color`、`NO_COLOR`、输出重定向、`-p` 和管道模式不会输出彩色启动内容。
+
+### API 配置向导
+
+进入 AutoMemory 后执行 `/setup`，即可逐步配置云 API：
+
+```text
+AutoMemory> /setup
+Configure LLM chat?
+  1. Configure or replace
+  2. Keep current settings
+```
+
+向导支持 OpenAI、DeepSeek、SiliconFlow 和自定义 OpenAI-compatible 的对话、嵌入与视觉模型；Cohere-compatible 重排序；MinerU 官方或自托管服务；DuckDuckGo 或 Tavily 搜索。预设值均可修改。部分服务商并不原生提供所有模型能力，标有“model required”的选项需要填写该账号或兼容网关实际支持的模型。
+
+最终确认前，所有值只保存在内存中；向导支持 `back`、`skip` 和 `cancel`。保存后可执行真实、低成本连接测试，并区分认证、余额/限流、网络、模型和响应格式错误。测试失败不会删除已经确认的配置。
+
 ### 对话与命令
 
 - 普通输入默认直接调用云端 LLM，不检索知识库。
@@ -38,7 +55,7 @@ automemory
 
 ### 密钥安全
 
-执行 `/secret set llm_api_key`，在隐藏输入提示中填写密钥。Windows 下密钥保存到 Windows 凭据管理器，不写入 `config.json`、SQLite、日志或导出文件。环境变量优先级高于已保存凭据：
+`/setup` 通过不进入终端历史的隐藏提示采集密钥。Windows 下密钥保存到 Windows 凭据管理器，不写入 `config.json`、SQLite、日志或导出文件。环境变量优先级高于已保存凭据：
 
 ```powershell
 $env:AUTOMEMORY_LLM_API_KEY="..."
@@ -47,7 +64,7 @@ $env:AUTOMEMORY_TAVILY_API_KEY="..."
 automemory
 ```
 
-LLM 支持 OpenAI 兼容接口；模型名和不含凭据的 Base URL 通过 `/config` 保存。嵌入、图片理解和重排序同样使用云 API；不配置嵌入 API 时仍可使用关键词检索。MinerU 支持官方 API 和自托管端点。DuckDuckGo 搜索无需 Key，Tavily 需要对应环境变量。搜索、网页抓取和 MinerU 请求由本地 EXE 发起，因此不受 GitHub Pages 浏览器 CORS 限制。
+高级用户仍可使用 `/config get|set|unset|list`、`/secret status|set|delete`、`/config test [service|all]` 和 `/secret test <credential>`。测试命令现在会执行真实、受限的服务请求，而不只是检查 Key 是否存在。嵌入、图片理解和重排序同样使用云 API；不配置嵌入 API 时仍可使用关键词检索。MinerU 支持官方 API 和自托管端点。DuckDuckGo 搜索无需 Key，Tavily 需要对应环境变量。搜索、网页抓取和 MinerU 请求由本地 EXE 发起，因此不受 GitHub Pages 浏览器 CORS 限制。
 
 知识库支持导入本地 PDF、文本/Markdown、图片和表格，以及搜索或抓取网页。评估数据集使用 JSON 数组，或包含 `cases` / `items` 的对象；每项至少提供 `query`，可通过 `expected` 文档 ID 和 `expected_media` 媒体 ID 计算 Precision@K、Recall@K、MRR、nDCG@K 与媒体召回率。评估结果只允许原子导出到 AutoMemory 的 exports 目录。
 

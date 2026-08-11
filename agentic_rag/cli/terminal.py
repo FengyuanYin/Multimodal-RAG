@@ -14,7 +14,8 @@ from .models import EventKind, OutputEvent
 class PlainTerminal:
     def __init__(self, *, stdin: TextIO | None = None, stdout: TextIO | None = None, stderr: TextIO | None = None, interactive: bool = False, color: bool = False) -> None:
         self.stdin, self.stdout, self.stderr = stdin or sys.stdin, stdout or sys.stdout, stderr or sys.stderr
-        self.interactive, self.color = interactive, color and not bool(os.getenv("NO_COLOR"))
+        ansi_capable = sys.platform != "win32" or bool(os.getenv("WT_SESSION") or os.getenv("ANSICON") or os.getenv("TERM"))
+        self.interactive, self.color = interactive, color and ansi_capable and os.getenv("TERM", "").lower() != "dumb" and not bool(os.getenv("NO_COLOR"))
         self._delta_open = False
 
     def emit(self, event: OutputEvent) -> None:
@@ -82,6 +83,37 @@ class PlainTerminal:
             raise UsageError("Secret input requires an interactive terminal", hint="Set the matching AUTOMEMORY_* environment variable for non-interactive use")
         return getpass.getpass(prompt, stream=self.stderr)
 
+    def read_form_value(self, prompt: str, default: str = "") -> str:
+        if not self.interactive:
+            raise UsageError("Setup requires an interactive terminal")
+        suffix = f" [{default}]" if default else ""
+        value = self.read_line(f"{prompt}{suffix}: ")
+        if value is None:
+            raise UsageError("Setup input ended before confirmation")
+        return value.strip() or default
+
+    def choose(self, prompt: str, options: list[tuple[str, str]], *, allow_back: bool = False, allow_skip: bool = False) -> str:
+        if not self.interactive:
+            raise UsageError("Setup requires an interactive terminal")
+        self.stdout.write(prompt + "\n")
+        for index, (_, label) in enumerate(options, 1):
+            self.stdout.write(f"  {index}. {label}\n")
+        controls = ["cancel"]
+        if allow_back:
+            controls.append("back")
+        if allow_skip:
+            controls.append("skip")
+        self.stdout.write(f"  ({'/'.join(controls)})\n")
+        self.stdout.flush()
+        while True:
+            value = self.read_form_value("Select").lower()
+            if value in controls:
+                return value
+            if value.isdigit() and 1 <= int(value) <= len(options):
+                return options[int(value) - 1][0]
+            self.stderr.write("Enter a listed number or control word.\n")
+            self.stderr.flush()
+
 
 class InteractiveTerminal(PlainTerminal):
     def __init__(self, history_file, completer, *, no_color: bool = False) -> None:
@@ -112,5 +144,15 @@ class InteractiveTerminal(PlainTerminal):
 
     def read_secret(self, prompt: str) -> str:
         if self._session:
-            return self._session.prompt(prompt, is_password=True)
+            return self._session.prompt(prompt, is_password=True, add_history=False)
         return super().read_secret(prompt)
+
+    def read_form_value(self, prompt: str, default: str = "") -> str:
+        if self._session:
+            suffix = f" [{default}]" if default else ""
+            try:
+                value = self._session.prompt(f"{prompt}{suffix}: ", add_history=False)
+            except EOFError as exc:
+                raise UsageError("Setup input ended before confirmation") from exc
+            return value.strip() or default
+        return super().read_form_value(prompt, default)

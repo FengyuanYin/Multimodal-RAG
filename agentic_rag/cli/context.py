@@ -9,7 +9,7 @@ from .config import AutoMemoryConfig, ConfigStore
 from .credentials import CredentialStore
 from .models import SearchResult
 from .paths import AutoMemoryPaths
-from .services import DiagnosticsService, DirectChatService, EvaluationService, GroundedChatService, IngestionService, RetrievalService
+from .services import ConnectionTester, DiagnosticsService, DirectChatService, EvaluationService, GroundedChatService, IngestionService, RetrievalService
 from .storage import KnowledgeRepository, StateRepository
 
 
@@ -32,6 +32,7 @@ class AppContext:
     grounded_chat: GroundedChatService | None = None
     evaluation: EvaluationService | None = None
     diagnostics: DiagnosticsService | None = None
+    connectivity: ConnectionTester | None = None
     current_conversation: str = ""
     search_results: list[SearchResult] = field(default_factory=list)
     last_trace: dict = field(default_factory=dict)
@@ -68,6 +69,7 @@ class AppContext:
         self.grounded_chat = GroundedChatService(self.state, self.llm_client, candidate, self.retrieval)
         self.evaluation = EvaluationService(self.retrieval, self.state, self.paths.exports_dir)
         self.diagnostics = DiagnosticsService(self.paths, self.state, self.knowledge, self.credentials, candidate)
+        self.connectivity = ConnectionTester(self)
         for client in old_clients:
             if client and client not in {self.llm_client, self.embedding_client, self.vlm_client, self.reranker_client, self.web_client}:
                 try:

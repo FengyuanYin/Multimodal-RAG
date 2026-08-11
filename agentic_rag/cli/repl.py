@@ -4,11 +4,15 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import signal
+import shutil
 import time
 
 from .cancellation import CancellationToken
 from .errors import AutoMemoryError, CancelledError, ExitCode, UsageError
 from .models import CommandResult, InputKind
+from . import __version__
+from .branding import render_startup_banner
+from .provider_presets import match_preset
 
 
 @contextmanager
@@ -70,8 +74,12 @@ def execute_once(text: str, ctx, output, router, *, debug: bool = False) -> int:
 
 
 def run_repl(ctx, output, router, *, debug: bool = False) -> int:
-    output.stdout.write("AutoMemory — cloud AI with opt-in local retrieval\n")
-    output.stdout.write("Type normally to chat; use /s <question> for knowledge retrieval; /help for commands.\n\n")
+    credential_ready = ctx.credentials.configured(ctx.config.llm.credential_name)
+    preset = match_preset("llm", ctx.config.llm.base_url)
+    provider = preset.label if preset else "Custom OpenAI-compatible"
+    summary = f"{provider} / {ctx.config.llm.model}" if credential_ready else "LLM not configured"
+    width = shutil.get_terminal_size((80, 24)).columns
+    output.stdout.write(render_startup_banner(width=width, color=output.color, version=__version__, llm_summary=summary, needs_setup=not credential_ready))
     output.stdout.flush()
     last_idle_interrupt = 0.0
     while True:

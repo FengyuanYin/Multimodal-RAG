@@ -31,7 +31,7 @@ class WebClient:
                 raise ConfigurationError("Tavily API key is not configured")
             data = self.transport.request_json("POST", "https://api.tavily.com/search", json_body={"api_key": api_key, "query": query, "max_results": limit, "search_depth": "basic"}, cancel=cancel)
             return [SearchResult(str(item.get("title", "")), str(item.get("url", "")), str(item.get("content", ""))[:500]) for item in (data.get("results") or [])[:limit]]
-        with self.transport.stream("GET", f"https://html.duckduckgo.com/html/?q={quote(query)}", headers={"User-Agent": "AutoMemory/0.2"}, cancel=cancel) as response:
+        with self.transport.stream("GET", f"https://html.duckduckgo.com/html/?q={quote(query)}", headers={"User-Agent": "AutoMemory/0.3"}, cancel=cancel) as response:
             raw = response.read()
         if len(raw) > self.MAX_BYTES:
             raise UpstreamError("DuckDuckGo response exceeded the allowed size")
@@ -58,7 +58,7 @@ class WebClient:
         current = validate_http_url(url)
         for _ in range(self.MAX_REDIRECTS + 1):
             cancel.checkpoint()
-            with self.transport.stream("GET", current, headers={"User-Agent": "AutoMemory/0.2"}, cancel=cancel) as response:
+            with self.transport.stream("GET", current, headers={"User-Agent": "AutoMemory/0.3"}, cancel=cancel) as response:
                 if response.is_redirect:
                     location = response.headers.get("location", "")
                     current = validate_http_url(str(response.url.join(location)))

@@ -46,7 +46,7 @@ from agentic_rag.config import Settings, settings
 from agentic_rag.factory import build_orchestrator
 from agentic_rag.service import ingest_documents
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     # 高层客户端

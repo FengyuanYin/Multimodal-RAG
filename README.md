@@ -34,6 +34,23 @@ To build the EXE locally with Python 3.11, run `powershell -ExecutionPolicy Bypa
 
 Set `AUTOMEMORY_HOME` to an absolute path or pass `--home <absolute-path>` to override `%APPDATA%\AutoMemory`. AutoMemory keeps its state, knowledge database, media, exports, cache, and logs in this isolated directory; it does not reuse or mutate the Web app's browser storage.
 
+Interactive startup displays a six-line purple-to-cyan `AutoMemory` brand in ANSI-capable terminals. Narrow terminals use a compact title. `--no-color`, `NO_COLOR`, redirected output, `-p`, and pipe mode never emit colored startup output.
+
+### Guided API setup
+
+Run `/setup` inside AutoMemory for a step-by-step cloud configuration wizard:
+
+```text
+AutoMemory> /setup
+Configure LLM chat?
+  1. Configure or replace
+  2. Keep current settings
+```
+
+The wizard supports OpenAI, DeepSeek, SiliconFlow, and custom OpenAI-compatible endpoints for chat, embeddings, and vision; Cohere-compatible reranking; official or self-hosted MinerU; and DuckDuckGo or Tavily search. Provider defaults remain editable. Some providers do not offer every model capability, so presets marked “model required” require a model supported by that account or compatible gateway.
+
+Values remain in memory until the final confirmation. `back`, `skip`, and `cancel` are available during setup. After saving, AutoMemory can issue a real, minimal connection test and distinguish authentication, quota/rate-limit, network, model, and malformed-response failures. A failed test does not delete the saved configuration.
+
 ### Chat and commands
 
 - Type a normal message to call the configured cloud LLM directly, without searching the knowledge base.
@@ -45,7 +62,7 @@ Set `AUTOMEMORY_HOME` to an absolute path or pass `--home <absolute-path>` to ov
 
 ### Secure cloud credentials
 
-Run `/secret set llm_api_key` and enter the key at the hidden prompt. On Windows it is stored by Windows Credential Manager, never in `config.json`, SQLite, logs, or exports. Environment variables override stored credentials:
+The `/setup` wizard collects keys through a hidden prompt that is excluded from terminal history. On Windows keys are stored by Windows Credential Manager, never in `config.json`, SQLite, logs, or exports. Environment variables override stored credentials:
 
 ```bash
 # OpenAI or another OpenAI-compatible LLM endpoint
@@ -56,7 +73,7 @@ export AUTOMEMORY_MINERU_API_KEY="..."
 export AUTOMEMORY_TAVILY_API_KEY="..."
 ```
 
-In PowerShell, use `$env:AUTOMEMORY_LLM_API_KEY="..."` for the current terminal session. Configure model names and credential-free Base URLs with `/config`. Embeddings, image understanding, and reranking also use cloud API profiles. Keyword retrieval remains available without an embedding API.
+In PowerShell, use `$env:AUTOMEMORY_LLM_API_KEY="..."` for the current terminal session. Advanced users can continue to use `/config get|set|unset|list`, `/secret status|set|delete`, `/config test [service|all]`, and `/secret test <credential>`. Tests now perform real bounded provider requests rather than checking only whether a key exists. Embeddings, image understanding, and reranking use cloud API profiles; keyword retrieval remains available without an embedding API.
 
 ### Knowledge sources and evaluation
 

@@ -33,7 +33,7 @@ jobs:
         shell: pwsh
         run: |
           $version = & .\dist\AutoMemory.exe --version
-          if ($LASTEXITCODE -ne 0 -or $version -notmatch "AutoMemory 0.2.0") { throw "EXE smoke test failed: $version" }
+          if ($LASTEXITCODE -ne 0 -or $version -notmatch "AutoMemory 0.3.0") { throw "EXE smoke test failed: $version" }
       - uses: actions/upload-artifact@v4
         with:
           name: AutoMemory-windows-x64

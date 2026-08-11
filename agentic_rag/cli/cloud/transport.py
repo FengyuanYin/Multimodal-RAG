@@ -67,6 +67,21 @@ class HttpTransport:
             error.code = "UPSTREAM_NETWORK"
             raise error from exc
 
+    def probe_status(self, method: str, url: str, *, headers: dict[str, str] | None = None, cancel: CancellationToken | None = None) -> int:
+        """Return an HTTP status without downloading or parsing the response body."""
+        if cancel:
+            cancel.checkpoint()
+        try:
+            with self.client.stream(method, url, headers=headers) as response:
+                status = response.status_code
+                if status in {401, 402, 403, 429} or status >= 500:
+                    raise classify_http_error(status, self.service)
+                return status
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            error = UpstreamError(f"{self.service} connectivity probe failed ({type(exc).__name__})")
+            error.code = "UPSTREAM_NETWORK"
+            raise error from exc
+
     @staticmethod
     def _sleep(seconds: float, cancel: CancellationToken | None) -> None:
         deadline = time.monotonic() + seconds

@@ -8,6 +8,7 @@ from agentic_rag.cli.credentials import CredentialStore
 from agentic_rag.cli.errors import SecurityError, UsageError
 from agentic_rag.cli.security import redact, validate_http_url
 from agentic_rag.cli.terminal import PlainTerminal
+from agentic_rag.cli.terminal import InteractiveTerminal
 
 
 def test_environment_credential_override_is_not_echoed() -> None:
@@ -30,3 +31,20 @@ def test_noninteractive_secret_prompt_fails_safely() -> None:
     terminal = PlainTerminal(stdin=StringIO(), stdout=StringIO(), stderr=StringIO())
     with pytest.raises(UsageError):
         terminal.read_secret("secret: ")
+
+
+def test_prompt_toolkit_form_and_secret_disable_history() -> None:
+    calls = []
+
+    class Session:
+        def prompt(self, prompt, **kwargs):
+            calls.append(kwargs)
+            return "value"
+
+    terminal = InteractiveTerminal.__new__(InteractiveTerminal)
+    PlainTerminal.__init__(terminal, stdin=StringIO(), stdout=StringIO(), stderr=StringIO(), interactive=True)
+    terminal._session = Session()
+    assert terminal.read_form_value("Model") == "value"
+    assert terminal.read_secret("Key: ") == "value"
+    assert calls[0]["add_history"] is False
+    assert calls[1]["add_history"] is False and calls[1]["is_password"] is True

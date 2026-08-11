@@ -81,6 +81,27 @@ class OpenAICompatibleClient:
                 output.append([float(value) for value in vector])
         return output
 
+    def probe_chat(self, cancel: CancellationToken) -> None:
+        payload = self.transport.request_json(
+            "POST",
+            f"{self.profile.base_url.rstrip('/')}/chat/completions",
+            headers=self._headers(),
+            json_body={
+                "model": self.profile.model,
+                "messages": [{"role": "user", "content": "Reply OK"}],
+                "temperature": 0,
+                "max_tokens": 1,
+                "stream": False,
+            },
+            cancel=cancel,
+        )
+        choices = payload.get("choices")
+        if not isinstance(choices, list) or not choices:
+            raise UpstreamError(f"{self.service} connectivity response contained no choices")
+
+    def probe_embedding(self, cancel: CancellationToken) -> None:
+        self.embeddings(["AutoMemory connectivity probe"], cancel)
+
     def describe_image(self, content: bytes, mime_type: str, prompt: str, cancel: CancellationToken) -> str:
         if len(content) > 10 * 1024 * 1024:
             raise ConfigurationError("Image exceeds the 10MB VLM request limit")

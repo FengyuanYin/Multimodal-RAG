@@ -42,3 +42,9 @@ class CohereRerankClient:
 
     def close(self) -> None:
         self.transport.close()
+
+    def probe(self, cancel: CancellationToken) -> None:
+        candidate = RetrievalHit("probe", "probe", "probe", "AutoMemory connectivity probe", 1, "text", 0.0)
+        result = self.rerank("AutoMemory", [candidate], 1, cancel)
+        if not result:
+            raise UpstreamError("Reranker connectivity response contained no result")

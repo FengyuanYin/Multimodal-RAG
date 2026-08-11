@@ -183,3 +183,35 @@ class DiagnosticItem:
     name: str
     status: Literal["ok", "degraded", "error"]
     detail: str
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderPreset:
+    id: str
+    service: str
+    label: str
+    protocol: str
+    base_url: str = ""
+    default_model: str = ""
+    credential_name: str = ""
+    requires_secret: bool = True
+
+
+@dataclass(slots=True)
+class SetupDraft:
+    config: Any
+    secrets: dict[str, str] = field(default_factory=dict)
+    changed_services: set[str] = field(default_factory=set)
+    test_after_save: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class ProbeResult:
+    service: str
+    status: Literal[
+        "success", "auth_error", "rate_limited", "network_error",
+        "model_error", "response_error", "reachable_unverified", "skipped",
+    ]
+    code: str
+    message: str
+    latency_ms: float | None = None

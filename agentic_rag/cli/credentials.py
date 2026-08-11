@@ -84,6 +84,23 @@ class CredentialStore:
                 return self._runtime[name]
         return self._read_windows(name)
 
+    def get_persisted(self, name: str) -> str | None:
+        """Read the managed slot without applying environment overrides."""
+        self._target(name)
+        with self._lock:
+            if name in self._runtime:
+                return self._runtime[name]
+        value = self._read_windows(name)
+        return value if value else None
+
+    def restore_persisted(self, name: str, value: str | None) -> None:
+        """Restore an exact snapshot without exposing it in diagnostics."""
+        self._target(name)
+        if value is None:
+            self.delete(name)
+        else:
+            self.set(name, value, persist=True)
+
     def set(self, name: str, value: str, *, persist: bool = True) -> None:
         value = value.strip()
         if not value:

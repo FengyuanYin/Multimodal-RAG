@@ -56,11 +56,24 @@ def classify_http_error(status: int, service: str) -> UpstreamError:
     if status in {401, 403}:
         error = UpstreamError(f"{service} rejected the configured credential", hint=f"Run /secret test {service.lower()}")
         error.code = "UPSTREAM_AUTH"
+        error.status = status
+        return error
+    if status == 402:
+        error = UpstreamError(f"{service} account has insufficient credit", hint="Check the provider account balance")
+        error.code = "UPSTREAM_QUOTA"
+        error.status = status
         return error
     if status == 429:
         error = UpstreamError(f"{service} rate limit or quota was reached", hint="Wait, reduce concurrency, or check account quota")
         error.code = "UPSTREAM_RATE_LIMIT"
+        error.status = status
+        return error
+    if status in {400, 404, 422}:
+        error = UpstreamError(f"{service} rejected the configured model or request (HTTP {status})", hint="Check the model name and provider-compatible endpoint")
+        error.code = "UPSTREAM_MODEL"
+        error.status = status
         return error
     error = UpstreamError(f"{service} request failed (HTTP {status})")
     error.code = "UPSTREAM_HTTP"
+    error.status = status
     return error
