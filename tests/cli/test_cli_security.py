@@ -33,7 +33,7 @@ def test_noninteractive_secret_prompt_fails_safely() -> None:
         terminal.read_secret("secret: ")
 
 
-def test_prompt_toolkit_form_and_secret_disable_history() -> None:
+def test_prompt_toolkit_form_and_secret_use_private_session() -> None:
     calls = []
 
     class Session:
@@ -43,8 +43,23 @@ def test_prompt_toolkit_form_and_secret_disable_history() -> None:
 
     terminal = InteractiveTerminal.__new__(InteractiveTerminal)
     PlainTerminal.__init__(terminal, stdin=StringIO(), stdout=StringIO(), stderr=StringIO(), interactive=True)
-    terminal._session = Session()
+    terminal._session = object()
+    terminal._private_session = Session()
     assert terminal.read_form_value("Model") == "value"
     assert terminal.read_secret("Key: ") == "value"
-    assert calls[0]["add_history"] is False
-    assert calls[1]["add_history"] is False and calls[1]["is_password"] is True
+    assert "add_history" not in calls[0]
+    assert "add_history" not in calls[1] and calls[1]["is_password"] is True
+
+
+def test_prompt_toolkit_private_session_discards_history(tmp_path, monkeypatch) -> None:
+    sessions = []
+
+    class Session:
+        def __init__(self, **kwargs):
+            self.history = kwargs["history"]
+            sessions.append(self)
+
+    monkeypatch.setattr("prompt_toolkit.PromptSession", Session)
+    terminal = InteractiveTerminal(tmp_path / "history", lambda _: [], no_color=True)
+    assert len(sessions) == 2
+    assert terminal._private_session.history.__class__.__name__ == "DummyHistory"

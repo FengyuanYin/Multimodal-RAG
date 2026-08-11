@@ -121,7 +121,7 @@ class InteractiveTerminal(PlainTerminal):
         try:
             from prompt_toolkit import PromptSession
             from prompt_toolkit.completion import Completer, Completion
-            from prompt_toolkit.history import FileHistory
+            from prompt_toolkit.history import DummyHistory, FileHistory
 
             class SlashCompleter(Completer):
                 def get_completions(self, document, complete_event):
@@ -131,8 +131,13 @@ class InteractiveTerminal(PlainTerminal):
                             yield Completion(value, start_position=-len(text))
 
             self._session = PromptSession(history=FileHistory(str(history_file)), completer=SlashCompleter(), complete_while_typing=False)
+            # prompt_toolkit does not provide a per-prompt ``add_history``
+            # switch. Keep setup fields and secrets on a separate session whose
+            # history intentionally discards every value.
+            self._private_session = PromptSession(history=DummyHistory())
         except ImportError:
             self._session = None
+            self._private_session = None
 
     def read_line(self, prompt: str = "AutoMemory> ") -> str | None:
         if self._session:
@@ -143,15 +148,15 @@ class InteractiveTerminal(PlainTerminal):
         return super().read_line(prompt)
 
     def read_secret(self, prompt: str) -> str:
-        if self._session:
-            return self._session.prompt(prompt, is_password=True, add_history=False)
+        if self._private_session:
+            return self._private_session.prompt(prompt, is_password=True)
         return super().read_secret(prompt)
 
     def read_form_value(self, prompt: str, default: str = "") -> str:
-        if self._session:
+        if self._private_session:
             suffix = f" [{default}]" if default else ""
             try:
-                value = self._session.prompt(f"{prompt}{suffix}: ", add_history=False)
+                value = self._private_session.prompt(f"{prompt}{suffix}: ")
             except EOFError as exc:
                 raise UsageError("Setup input ended before confirmation") from exc
             return value.strip() or default
