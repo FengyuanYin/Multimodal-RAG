@@ -53,12 +53,95 @@ Values remain in memory until the final confirmation. `back`, `skip`, and `cance
 
 ### Chat and commands
 
-- Type a normal message to call the configured cloud LLM directly, without searching the knowledge base.
-- Only a message beginning with the exact `/s` prefix enables local knowledge retrieval: `/s What does the paper conclude?`
-- `/search <keywords>` searches the Web; `/fetch <url>` captures a public page; `/mineru <pdf>` uses the cloud MinerU API.
-- `/add <path>`, `/docs`, `/sessions`, `/memory`, `/eval`, `/config`, `/secret`, `/diagnose`, and `/help` provide the remaining workflows.
-- `Ctrl+C` cancels active work. Use `/exit` or EOF to close the program.
-- For automation, `AutoMemory.exe -p "question"` writes the streamed answer to stdout and errors to stderr.
+Commands use Windows-friendly tokenization. Wrap paths or names containing spaces in double quotes. An ID may be shortened to a unique prefix. Options in `[brackets]` are optional; `--force` and `--yes` skip interactive confirmation.
+
+#### Chat input
+
+| Input | Meaning | Output |
+|---|---|---|
+| `<message>` | Direct cloud-LLM chat. The knowledge base is not searched. | A streamed answer; the user and assistant messages are saved in the active conversation. |
+| `/s <question>` | Search the local knowledge base using the configured retrieval mode, then ask the cloud LLM with retrieved context. `/s` must be the exact lowercase first token. | A streamed grounded answer, numbered sources, and a retrieval trace available through `/trace`. |
+
+#### Core and diagnostics
+
+| Command and input | Meaning | Output / side effect |
+|---|---|---|
+| `/help [command]` or `/? [command]` | List commands, or show usage for one command. | Grouped command list or one usage line. |
+| `/version` | Show the running AutoMemory version. | `AutoMemory 0.3.0`. |
+| `/diagnose [--errors]` | Check local databases, data directory, cloud credential presence, and required CLI dependencies. `--errors` also includes recent redacted errors from this process. | One `OK`, `DEGRADED`, or `ERROR` line per check; no secret values. It does not make provider API calls. |
+| `/path` | Show the isolated data locations used by this process. | Home, exports, and logs paths. |
+| `/exit` or `/quit` | Close the REPL after the current command returns. | Clean process exit; databases and clients are closed. |
+
+#### Conversations and long-term memory
+
+| Command and input | Meaning | Output / side effect |
+|---|---|---|
+| `/new [title]` | Create and select a conversation; default title is `New conversation`. | New conversation ID and title. |
+| `/sessions` | List saved conversations. | IDs and titles; `*` marks the active conversation. |
+| `/use <conversation-id>` | Switch to a conversation using its full ID or unique prefix. | Selected conversation ID. |
+| `/rename <title>` | Rename the active conversation. | Confirmation containing the new title. |
+| `/clear [--force]` | Remove every message from the active conversation. | Confirmation prompt unless forced, then `Current conversation cleared`. The conversation itself remains. |
+| `/delete [conversation-id] [--force]` | Delete the selected conversation, or the active one when no ID is supplied. | Confirmation prompt unless forced, deletion result, and automatic selection/creation of another active conversation. |
+| `/memory` or `/memory list` | List long-term memory entries. | Entry status (`on`/`off`), ID, and content. |
+| `/memory add <content>` | Add an enabled long-term memory for future chat context. | New memory ID. |
+| `/memory enable\|disable <memory-id>` | Include or exclude a saved memory without deleting it. | Updated memory ID and state. |
+| `/memory delete <memory-id>` | Permanently remove a memory. | Deleted memory ID. |
+
+#### Knowledge base and retrieval
+
+| Command and input | Meaning | Output / side effect |
+|---|---|---|
+| `/add <path> [path...] [--category id] [--vlm]` | Import one or more local PDF, text/Markdown, image, or spreadsheet files. `--vlm` asks the configured cloud vision model to caption extracted images. | Parse/chunk/embed progress, one imported-or-duplicate result per file, and a rebuilt retrieval index. |
+| `/docs [--category id]` | List all documents, or only one category. | Document ID, title, source type/parser, status, chunk/media counts, and category. |
+| `/doc <document-id>` | Inspect one document using a full ID or unique prefix. | Title, source, parser, status, pages, chunks, and media counts. |
+| `/remove <document-id> [--force]` | Delete a document, its chunks, embeddings, and stored media, then rebuild the index. | Confirmation prompt unless forced, followed by the deleted document ID. |
+| `/category` or `/category list` | List knowledge categories. | Category IDs and names. |
+| `/category add <name>` | Create a category. | New category ID and name. |
+| `/category rename <id> <name>` | Rename a category. | Renamed category ID. |
+| `/category delete <id> [--force]` | Delete an empty category. Documents must be removed or moved first. | Confirmation prompt unless forced, then deleted category ID. |
+| `/reindex` | Rebuild the derived keyword index from stored chunks. | Number of indexed chunks. It does not reparse source files. |
+| `/trace` | Show details of the most recent `/s` retrieval in the current process. | JSON containing retrieval mode, channels, scores, fallbacks, and scope; otherwise a “no RAG query” message. |
+| `/export <media-id> [filename]` | Copy a stored media asset to AutoMemory's exports directory. | Absolute exported file path. The optional filename is sanitized. |
+| `/mineru <pdf-path> [--category id] [--selfhost]` | Parse a PDF through the configured MinerU service; `--selfhost` overrides the saved mode for this command. | Upload/poll/download/ingestion progress, imported document summary, task status, and rebuilt index. |
+
+#### Web and evaluation
+
+| Command and input | Meaning | Output / side effect |
+|---|---|---|
+| `/search <keywords>` | Search with the configured DuckDuckGo or Tavily provider. | Numbered results containing title, URL, and snippet; the numbered list is retained for the next `/fetch`. |
+| `/fetch <result-number\|url> [--category id] [--yes]` | Fetch a public page by URL or by number from the last search, preview its readable text, then optionally import it. | Title, final URL, character count, and preview; after confirmation, an import result and rebuilt index. `--yes` imports immediately. |
+| `/eval <dataset.json> [--mode keyword\|vector\|hybrid\|multimodal] [--top-k N] [--scope id] [--export]` | Run deterministic retrieval evaluation. Each JSON case requires `query`; `expected` and `expected_media` enable relevance metrics. | Progress plus summary JSON for Precision@K, Recall@K, MRR, nDCG@K, media recall, and latency. `--export` also writes the full run under exports. |
+
+#### API configuration and credentials
+
+| Command and input | Meaning | Output / side effect |
+|---|---|---|
+| `/setup` | Guided configuration for LLM, embedding, VLM, reranker, MinerU, and Web search. Settings remain staged until final confirmation. | Redacted summary, secure credential saves, config reload, and optional real connection tests. `back`, `skip`, and `cancel` are supported. |
+| `/config` or `/config list` | Show every non-secret setting. | Formatted JSON; credentials are never included. |
+| `/config get <key>` | Read a dotted config key, for example `llm.model` or `retrieval_mode`. | JSON value. |
+| `/config set <key> <value>` | Validate and save a non-secret setting. JSON literals such as `5`, `true`, and quoted strings are accepted. | Saved-key confirmation; services and derived indexes are reloaded. |
+| `/config unset <key>` | Reset one key to its AutoMemory default. | Reset confirmation; services are reloaded. |
+| `/config test [llm\|embedding\|vlm\|reranker\|mineru\|web\|all]` | Send a real, minimal request to one service or all services. Default is `all`. | Per-service latency and stable status (`success`, auth, rate/quota, network, model, response, or not configured), followed by summary JSON. API usage may incur a small provider charge. |
+| `/secret` or `/secret status` | Show where each supported credential comes from. | `environment`, Windows Credential Manager/session, or `not-configured`; never the value. |
+| `/secret set <name>` | Securely enter and store one credential. Do not append the key to the command. | Hidden prompt, credential-source confirmation, and service reload. |
+| `/secret delete <name>` | Delete a stored credential. Environment overrides are not modified. | Deleted/not-stored result and service reload. |
+| `/secret test <name>` | Map a credential to its service and perform the same real probe as `/config test`. | Probe line plus credential status/code. |
+
+Credential names are `llm_api_key`, `embedding_api_key`, `vlm_api_key`, `reranker_api_key`, `mineru_api_key`, and `tavily_api_key`.
+
+#### Process arguments and output behavior
+
+| Startup input | Meaning / output |
+|---|---|
+| `AutoMemory.exe -p "<message or command>"` | Run once and exit. Answers/results go to stdout; errors go to stderr. Use `-p "/s question"` for retrieval. Interactive-only commands such as `/setup` are rejected. |
+| `AutoMemory.exe --home <absolute-path>` | Use a different isolated data directory for config, databases, media, logs, cache, and exports. |
+| `AutoMemory.exe --no-color` | Disable ANSI color. |
+| `AutoMemory.exe --plain` | Use plain line-oriented stdin mode: no banner, prompt, completion, or ANSI color. Each entered line is executed; send EOF to finish. |
+| `AutoMemory.exe --debug` | Include exception type/details for unexpected internal errors. Secrets remain redacted from recorded diagnostics. |
+| `AutoMemory.exe --version` | Print the version and exit. |
+| Piped lines, for example `Get-Content commands.txt \| AutoMemory.exe` | Execute one input per line without banner/color; stop on `/exit` or the first error. |
+
+`Ctrl+C` cancels active work. At an idle prompt, press it twice within 1.5 seconds to exit. EOF (`Ctrl+Z`, then Enter, on Windows) also exits.
 
 ### Secure cloud credentials
 

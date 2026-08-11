@@ -46,12 +46,95 @@ Configure LLM chat?
 
 ### 对话与命令
 
-- 普通输入默认直接调用云端 LLM，不检索知识库。
-- 只有消息以精确的 `/s` 前缀开头才检索知识库，例如：`/s 这篇论文的结论是什么？`
-- `/search <关键词>` 搜索网页，`/fetch <网址>` 抓取网页，`/mineru <PDF路径>` 调用云端 MinerU。
-- `/add`、`/docs`、`/sessions`、`/memory`、`/eval`、`/config`、`/secret`、`/diagnose` 和 `/help` 提供其余管理功能。
-- `Ctrl+C` 取消当前任务，`/exit` 或 EOF 退出。
-- 自动化调用可使用 `AutoMemory.exe -p "问题"`；回答写入 stdout，错误写入 stderr。
+命令采用兼容 Windows 路径的参数解析。路径或名称包含空格时用双引号包裹。ID 可以填写能够唯一匹配的前缀；`[方括号]` 表示可选参数；`--force` 和 `--yes` 用于跳过交互确认。
+
+#### 对话输入
+
+| 输入 | 含义 | 产出 |
+|---|---|---|
+| `<消息>` | 直接与云端 LLM 对话，不检索知识库。 | 流式回答；用户消息与助手回答写入当前会话。 |
+| `/s <问题>` | 按当前检索模式搜索本地知识库，再携带检索上下文调用云端 LLM。`/s` 必须是消息开头精确的小写首个单词。 | 流式、有依据的回答、编号来源；本次检索轨迹可通过 `/trace` 查看。 |
+
+#### 核心与诊断
+
+| 命令与输入 | 含义 | 产出/副作用 |
+|---|---|---|
+| `/help [命令]` 或 `/? [命令]` | 列出全部命令，或查看某个命令的用法。 | 按分组排列的命令列表，或单个命令的 Usage。 |
+| `/version` | 查看当前运行版本。 | `AutoMemory 0.3.0`。 |
+| `/diagnose [--errors]` | 检查本地数据库、数据目录、云凭据是否已配置以及 CLI 依赖；`--errors` 追加当前进程最近的脱敏错误。 | 每项输出 `OK`、`DEGRADED` 或 `ERROR`；不显示密钥，也不会调用服务商 API。 |
+| `/path` | 查看当前进程使用的隔离数据目录。 | Home、exports 和 logs 的绝对路径。 |
+| `/exit` 或 `/quit` | 当前命令返回后安全关闭 REPL。 | 正常退出进程，并关闭数据库和网络客户端。 |
+
+#### 会话与长期记忆
+
+| 命令与输入 | 含义 | 产出/副作用 |
+|---|---|---|
+| `/new [标题]` | 新建并选中会话；默认标题为 `New conversation`。 | 新会话 ID 和标题。 |
+| `/sessions` | 列出已保存的会话。 | 会话 ID、标题；`*` 表示当前会话。 |
+| `/use <会话ID>` | 通过完整 ID 或唯一前缀切换会话。 | 已选中的会话 ID。 |
+| `/rename <新标题>` | 重命名当前会话。 | 包含新标题的确认信息。 |
+| `/clear [--force]` | 清空当前会话的全部消息。 | 未使用 `--force` 时先确认，之后输出清空结果；会话本身仍保留。 |
+| `/delete [会话ID] [--force]` | 删除指定会话；省略 ID 时删除当前会话。 | 未强制时先确认；输出删除结果，并自动选中或创建另一个会话。 |
+| `/memory` 或 `/memory list` | 列出长期记忆。 | 启用状态（`on`/`off`）、ID 和内容。 |
+| `/memory add <内容>` | 添加一条默认启用、供后续对话使用的长期记忆。 | 新记忆 ID。 |
+| `/memory enable\|disable <记忆ID>` | 启用或停用记忆，不删除内容。 | 记忆 ID 和更新后的状态。 |
+| `/memory delete <记忆ID>` | 永久删除一条记忆。 | 被删除的记忆 ID。 |
+
+#### 知识库与检索
+
+| 命令与输入 | 含义 | 产出/副作用 |
+|---|---|---|
+| `/add <路径> [更多路径...] [--category ID] [--vlm]` | 导入一个或多个本地 PDF、文本/Markdown、图片或表格文件。`--vlm` 使用已配置的云端视觉模型描述抽取图片。 | 解析、分块、嵌入进度；每个文件的导入或重复结果；随后重建检索索引。 |
+| `/docs [--category ID]` | 列出全部文档，或只显示某个分类。 | 文档 ID、标题、来源类型/解析器、状态、chunk/media 数量和分类。 |
+| `/doc <文档ID>` | 通过完整 ID 或唯一前缀查看单个文档。 | 标题、来源、解析器、状态、页数、chunk 数和 media 数。 |
+| `/remove <文档ID> [--force]` | 删除文档、chunk、嵌入和已保存媒体，并重建索引。 | 未强制时先确认，随后输出被删除的文档 ID。 |
+| `/category` 或 `/category list` | 列出知识分类。 | 分类 ID 和名称。 |
+| `/category add <名称>` | 新建分类。 | 新分类 ID 和名称。 |
+| `/category rename <ID> <名称>` | 重命名分类。 | 已重命名的分类 ID。 |
+| `/category delete <ID> [--force]` | 删除空分类；需要先删除或迁移其中的文档。 | 未强制时先确认，随后输出已删除分类 ID。 |
+| `/reindex` | 根据已保存 chunk 重建派生的关键词索引。 | 已索引的 chunk 数量；不会重新解析源文件。 |
+| `/trace` | 查看当前进程最近一次 `/s` 检索详情。 | 包含检索模式、通道、分数、降级路径和范围的 JSON；尚未检索时输出提示。 |
+| `/export <媒体ID> [文件名]` | 将知识库媒体复制到 AutoMemory exports 目录。 | 导出文件绝对路径；可选文件名会经过安全清理。 |
+| `/mineru <PDF路径> [--category ID] [--selfhost]` | 使用已配置的 MinerU 解析 PDF；`--selfhost` 只对本次命令强制使用自托管模式。 | 上传、轮询、下载、入库进度，导入摘要、任务状态和重建后的索引。 |
+
+#### Web 与评估
+
+| 命令与输入 | 含义 | 产出/副作用 |
+|---|---|---|
+| `/search <关键词>` | 使用当前 DuckDuckGo 或 Tavily 服务搜索互联网。 | 带编号的标题、URL 和摘要；编号结果会保留给下一次 `/fetch` 使用。 |
+| `/fetch <结果编号\|URL> [--category ID] [--yes]` | 按上次搜索编号或公开 URL 抓取网页，预览正文，再选择是否入库。 | 标题、最终 URL、字符数和正文预览；确认后输出导入结果并重建索引。`--yes` 表示直接导入。 |
+| `/eval <数据集.json> [--mode keyword\|vector\|hybrid\|multimodal] [--top-k N] [--scope ID] [--export]` | 执行确定性的检索评估。每条 JSON 至少需要 `query`；`expected` 和 `expected_media` 用于计算相关性指标。 | 进度，以及 Precision@K、Recall@K、MRR、nDCG@K、媒体召回率和延迟的汇总 JSON；`--export` 还会把完整结果写入 exports。 |
+
+#### API 配置与凭据
+
+| 命令与输入 | 含义 | 产出/副作用 |
+|---|---|---|
+| `/setup` | 引导配置 LLM、Embedding、VLM、Reranker、MinerU 和网页搜索；最终确认前只保存在内存草稿中。 | 脱敏汇总、安全保存凭据、重新加载配置，并可执行真实连接测试；支持 `back`、`skip`、`cancel`。 |
+| `/config` 或 `/config list` | 查看所有非敏感配置。 | 格式化 JSON，永远不包含密钥。 |
+| `/config get <键>` | 读取点号路径配置，例如 `llm.model` 或 `retrieval_mode`。 | JSON 值。 |
+| `/config set <键> <值>` | 校验并保存非敏感配置；支持 `5`、`true`、带引号字符串等 JSON 字面量。 | 保存确认；重新加载服务和派生索引。 |
+| `/config unset <键>` | 把一个配置项恢复为 AutoMemory 默认值。 | 重置确认并重新加载服务。 |
+| `/config test [llm\|embedding\|vlm\|reranker\|mineru\|web\|all]` | 向一个服务或全部服务发送真实、最小请求；默认测试 `all`。 | 每项延迟与稳定状态（成功、认证、余额/限流、网络、模型、响应或未配置），之后输出汇总 JSON；可能产生少量 API 费用。 |
+| `/secret` 或 `/secret status` | 查看各凭据的来源。 | 环境变量、Windows 凭据管理器/session 或 `not-configured`，绝不显示值。 |
+| `/secret set <名称>` | 通过隐藏输入安全保存一个凭据；不要把 Key 追加到命令行。 | 隐藏提示、凭据来源确认，并重新加载服务。 |
+| `/secret delete <名称>` | 删除已存储凭据；不会修改环境变量。 | 删除/未存储结果，并重新加载服务。 |
+| `/secret test <名称>` | 将凭据映射到对应服务，执行与 `/config test` 相同的真实探测。 | 探测结果以及凭据状态码。 |
+
+凭据名称包括：`llm_api_key`、`embedding_api_key`、`vlm_api_key`、`reranker_api_key`、`mineru_api_key`、`tavily_api_key`。
+
+#### 启动参数与输出约定
+
+| 启动输入 | 含义/产出 |
+|---|---|
+| `AutoMemory.exe -p "<消息或命令>"` | 执行一次后退出。回答/结果写入 stdout，错误写入 stderr；使用 `-p "/s 问题"` 检索。`/setup` 等仅交互命令会被拒绝。 |
+| `AutoMemory.exe --home <绝对路径>` | 为配置、数据库、媒体、日志、缓存和导出指定另一个隔离数据目录。 |
+| `AutoMemory.exe --no-color` | 禁用 ANSI 彩色输出。 |
+| `AutoMemory.exe --plain` | 使用纯文本逐行 stdin 模式：不显示艺术字、提示符、补全或 ANSI 颜色；每输入一行就执行一次，发送 EOF 后结束。 |
+| `AutoMemory.exe --debug` | 意外内部错误发生时显示异常类型和细节；诊断记录中的密钥仍会脱敏。 |
+| `AutoMemory.exe --version` | 输出版本后退出。 |
+| 管道输入，例如 `Get-Content commands.txt \| AutoMemory.exe` | 每行执行一个输入，不显示启动艺术字和颜色；遇到 `/exit` 或首个错误时停止。 |
+
+`Ctrl+C` 用于取消正在执行的任务。在空闲提示符连续两次按下（间隔不超过 1.5 秒）即可退出；Windows 下也可使用 EOF（`Ctrl+Z` 后按 Enter）退出。
 
 ### 密钥安全
 
