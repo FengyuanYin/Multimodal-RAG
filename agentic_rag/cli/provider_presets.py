@@ -25,6 +25,7 @@ PRESETS: tuple[ProviderPreset, ...] = (
     ProviderPreset("deepseek", "vlm", "DeepSeek-compatible (vision model required)", "openai-compatible", _DEEPSEEK, "", "vlm_api_key"),
     ProviderPreset("siliconflow", "vlm", "SiliconFlow", "openai-compatible", _SILICONFLOW, "Qwen/Qwen2.5-VL-72B-Instruct", "vlm_api_key"),
     ProviderPreset("custom", "vlm", "Custom OpenAI-compatible", "openai-compatible", "", "", "vlm_api_key"),
+    ProviderPreset("siliconflow", "reranker", "SiliconFlow", "siliconflow-rerank", _SILICONFLOW, "BAAI/bge-reranker-v2-m3", "reranker_api_key"),
     ProviderPreset("cohere", "reranker", "Cohere", "cohere-compatible", "https://api.cohere.com", "rerank-v3.5", "reranker_api_key"),
     ProviderPreset("custom", "reranker", "Custom Cohere-compatible", "cohere-compatible", "", "", "reranker_api_key"),
     ProviderPreset("official", "mineru", "MinerU Official", "mineru", "https://mineru.net/api/v4", "", "mineru_api_key"),

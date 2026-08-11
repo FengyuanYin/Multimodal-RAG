@@ -5,7 +5,7 @@ from __future__ import annotations
 from .config import AutoMemoryConfig, validate_config
 from .errors import CancelledError, ConfigurationError, UsageError
 from .models import CommandResult, EventKind, OutputEvent, SetupDraft
-from .provider_presets import normalize_base_url, presets_for
+from .provider_presets import match_preset, normalize_base_url, presets_for
 from .security import validate_http_url
 
 
@@ -121,7 +121,8 @@ class SetupWizard:
             if not model.strip():
                 raise ConfigurationError(f"{SERVICE_LABELS[service]} model is required")
             profile.base_url, profile.model = base_url.rstrip("/"), model.strip()
-            self._collect_secret(draft, preset.credential_name, preset.requires_secret)
+            reuse = self._siliconflow_reuse_candidate(draft) if service == "reranker" and preset.id == "siliconflow" else None
+            self._collect_secret(draft, preset.credential_name, preset.requires_secret, reuse=reuse)
         elif service == "mineru":
             draft.config.mineru_mode = preset.id
             if preset.id == "official":
@@ -139,11 +140,14 @@ class SetupWizard:
         draft.changed_services.add(service)
         return True
 
-    def _collect_secret(self, draft: SetupDraft, credential_name: str, required: bool) -> None:
+    def _collect_secret(self, draft: SetupDraft, credential_name: str, required: bool, *, reuse: tuple[str, str] | None = None) -> None:
         if not credential_name:
             return
         configured = self.context.credentials.configured(credential_name)
         if configured and not self.terminal.confirm(f"Replace the existing {credential_name}?", default=False):
+            return
+        if reuse and self.terminal.confirm(f"Reuse the {reuse[0]} SiliconFlow API key for Reranker?", default=True):
+            draft.secrets[credential_name] = reuse[1]
             return
         if not required and not self.terminal.confirm(f"Configure optional {credential_name}?", default=False):
             return
@@ -152,6 +156,17 @@ class SetupWizard:
             raise ConfigurationError(f"{credential_name} is required")
         if value:
             draft.secrets[credential_name] = value
+
+    def _siliconflow_reuse_candidate(self, draft: SetupDraft) -> tuple[str, str] | None:
+        for service in ("llm", "embedding", "vlm"):
+            profile = getattr(draft.config, service)
+            preset = match_preset(service, profile.base_url)
+            if not preset or preset.id != "siliconflow":
+                continue
+            value = draft.secrets.get(profile.credential_name) or self.context.credentials.get(profile.credential_name)
+            if value:
+                return SERVICE_LABELS[service], value
+        return None
 
     def _show_summary(self, draft: SetupDraft) -> None:
         lines = ["Setup summary (credentials are never displayed):"]

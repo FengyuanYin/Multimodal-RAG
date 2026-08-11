@@ -40,7 +40,7 @@ Configure LLM chat?
   2. Keep current settings
 ```
 
-向导支持 OpenAI、DeepSeek、SiliconFlow 和自定义 OpenAI-compatible 的对话、嵌入与视觉模型；Cohere-compatible 重排序；MinerU 官方或自托管服务；DuckDuckGo 或 Tavily 搜索。预设值均可修改。部分服务商并不原生提供所有模型能力，标有“model required”的选项需要填写该账号或兼容网关实际支持的模型。
+向导支持 OpenAI、DeepSeek、SiliconFlow 和自定义 OpenAI-compatible 的对话、嵌入与视觉模型；SiliconFlow 或 Cohere-compatible 重排序；MinerU 官方或自托管服务；DuckDuckGo 或 Tavily 搜索。预设值均可修改。选择 SiliconFlow 重排序时，经确认可复用本轮已为对话、嵌入或视觉模型填写的 SiliconFlow Key。部分服务商并不原生提供所有模型能力，标有“model required”的选项需要填写该账号或兼容网关实际支持的模型。
 
 最终确认前，所有值只保存在内存中；向导支持 `back`、`skip` 和 `cancel`。保存后可执行真实、低成本连接测试，并区分认证、余额/限流、网络、模型和响应格式错误。测试失败不会删除已经确认的配置。
 

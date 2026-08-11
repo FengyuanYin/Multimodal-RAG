@@ -22,6 +22,9 @@ class FakeCredentials:
     def source(self, name):
         return "stored" if self.configured(name) else "not-configured"
 
+    def get(self, name):
+        return self.values.get(name, "")
+
     def get_persisted(self, name):
         return self.values.get(name)
 
@@ -115,3 +118,21 @@ def test_commit_failure_restores_config_and_credentials() -> None:
         SetupApplier.commit(ctx, draft)
     assert ctx.credentials.values["llm_api_key"] == "old-secret"
     assert ctx.config.llm.model != "changed-model"
+
+
+def test_siliconflow_reranker_can_reuse_staged_llm_key() -> None:
+    ctx = make_context()
+    terminal = ScriptedTerminal(
+        ["configure", "siliconflow", "skip", "skip", "configure", "siliconflow", "skip", "skip"],
+        ["", "", "", ""],
+        ["shared-siliconflow-key"],
+        [True, False, True],
+    )
+
+    result = SetupWizard(ctx, terminal, CancellationToken()).run()
+
+    assert result.ok
+    assert ctx.config.reranker.base_url == "https://api.siliconflow.cn/v1"
+    assert ctx.config.reranker.model == "BAAI/bge-reranker-v2-m3"
+    assert ctx.credentials.values["reranker_api_key"] == "shared-siliconflow-key"
+    assert all("shared-siliconflow-key" not in event.text for event in terminal.events)

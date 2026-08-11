@@ -47,7 +47,7 @@ Configure LLM chat?
   2. Keep current settings
 ```
 
-The wizard supports OpenAI, DeepSeek, SiliconFlow, and custom OpenAI-compatible endpoints for chat, embeddings, and vision; Cohere-compatible reranking; official or self-hosted MinerU; and DuckDuckGo or Tavily search. Provider defaults remain editable. Some providers do not offer every model capability, so presets marked “model required” require a model supported by that account or compatible gateway.
+The wizard supports OpenAI, DeepSeek, SiliconFlow, and custom OpenAI-compatible endpoints for chat, embeddings, and vision; SiliconFlow or Cohere-compatible reranking; official or self-hosted MinerU; and DuckDuckGo or Tavily search. Provider defaults remain editable. When SiliconFlow reranking is selected, AutoMemory can reuse a SiliconFlow key already entered for chat, embeddings, or vision after confirmation. Some providers do not offer every model capability, so presets marked “model required” require a model supported by that account or compatible gateway.
 
 Values remain in memory until the final confirmation. `back`, `skip`, and `cancel` are available during setup. After saving, AutoMemory can issue a real, minimal connection test and distinguish authentication, quota/rate-limit, network, model, and malformed-response failures. A failed test does not delete the saved configuration.
 

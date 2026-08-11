@@ -134,10 +134,12 @@ class InteractiveTerminal(PlainTerminal):
             # prompt_toolkit does not provide a per-prompt ``add_history``
             # switch. Keep setup fields and secrets on a separate session whose
             # history intentionally discards every value.
-            self._private_session = PromptSession(history=DummyHistory())
+            self._form_session = PromptSession(history=DummyHistory())
+            self._secret_session = PromptSession(history=DummyHistory())
         except ImportError:
             self._session = None
-            self._private_session = None
+            self._form_session = None
+            self._secret_session = None
 
     def read_line(self, prompt: str = "AutoMemory> ") -> str | None:
         if self._session:
@@ -148,15 +150,15 @@ class InteractiveTerminal(PlainTerminal):
         return super().read_line(prompt)
 
     def read_secret(self, prompt: str) -> str:
-        if self._private_session:
-            return self._private_session.prompt(prompt, is_password=True)
+        if self._secret_session:
+            return self._secret_session.prompt(prompt, is_password=True)
         return super().read_secret(prompt)
 
     def read_form_value(self, prompt: str, default: str = "") -> str:
-        if self._private_session:
+        if self._form_session:
             suffix = f" [{default}]" if default else ""
             try:
-                value = self._private_session.prompt(f"{prompt}{suffix}: ")
+                value = self._form_session.prompt(f"{prompt}{suffix}: ", is_password=False)
             except EOFError as exc:
                 raise UsageError("Setup input ended before confirmation") from exc
             return value.strip() or default

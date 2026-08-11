@@ -1,4 +1,4 @@
-"""Cohere-compatible cloud reranking."""
+"""Cohere-compatible and SiliconFlow cloud reranking."""
 
 from __future__ import annotations
 
@@ -6,6 +6,14 @@ from ..cancellation import CancellationToken
 from ..errors import ConfigurationError, UpstreamError
 from ..models import RetrievalHit, ServiceProfile
 from .transport import HttpTransport
+
+
+def resolve_rerank_url(base_url: str) -> str:
+    """Resolve versioned rerank endpoints without changing the config schema."""
+    base = base_url.rstrip("/")
+    if base.endswith(("/v1", "/v2")):
+        return f"{base}/rerank"
+    return f"{base}/v2/rerank"
 
 
 class CohereRerankClient:
@@ -19,7 +27,7 @@ class CohereRerankClient:
         if not self.api_key:
             raise ConfigurationError("Reranker API key is not configured")
         payload = self.transport.request_json(
-            "POST", f"{self.profile.base_url.rstrip('/')}/v2/rerank",
+            "POST", resolve_rerank_url(self.profile.base_url),
             headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
             json_body={"model": self.profile.model, "query": query, "documents": [item.text[:4000] for item in candidates], "top_n": min(top_k, len(candidates))},
             cancel=cancel,
