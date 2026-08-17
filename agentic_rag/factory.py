@@ -83,11 +83,12 @@ def build_orchestrator(settings_obj=None):
     try:
         vector_store = VectorStoreFactory.create(
             db_type=cfg.vector_db_type,
-            collection_name="default",
+            collection_name=cfg.milvus_collection,
             embedding_dim=cfg.embedding_dim,
-            persist_dir=cfg.vector_db_path,
-            host=cfg.qdrant_host,
-            port=cfg.qdrant_port,
+            uri=cfg.milvus_uri,
+            database=cfg.milvus_database,
+            token=cfg.milvus_token,
+            timeout_seconds=cfg.milvus_timeout_seconds,
         )
         logger.info(f"向量存储初始化: {cfg.vector_db_type}")
     except Exception as e:

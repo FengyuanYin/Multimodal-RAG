@@ -21,11 +21,12 @@ class Settings(BaseSettings):
     api_key: Optional[str] = None  # 为空则不启用认证
 
     # ── 向量数据库 ──
-    vector_db_type: str = "chroma"  # chroma | qdrant
-    vector_db_path: str = "./data/vector_db"
-    # Qdrant 配置
-    qdrant_host: str = "localhost"
-    qdrant_port: int = 6333
+    vector_db_type: str = "milvus"
+    milvus_uri: str = "http://localhost:19530"
+    milvus_database: str = "default"
+    milvus_collection: str = "agentic_rag_vectors"
+    milvus_token: Optional[str] = None
+    milvus_timeout_seconds: float = 10.0
 
     # ── 图数据库 ──
     graph_db_type: str = "networkx"  # networkx | neo4j

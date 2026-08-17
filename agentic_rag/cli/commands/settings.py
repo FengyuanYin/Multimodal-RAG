@@ -96,12 +96,18 @@ def secret(ctx, args, output, cancel, router):
         require_count(args, 1, "/secret test <name>")
         if args[0] not in ENV_NAMES:
             raise UsageError(f"Unknown credential name: {args[0]}")
-        service_by_credential = {
-            "llm_api_key": "llm", "embedding_api_key": "embedding", "vlm_api_key": "vlm",
-            "reranker_api_key": "reranker", "mineru_api_key": "mineru", "tavily_api_key": "web",
-        }
-        result = ctx.connectivity.test_services({service_by_credential[args[0]]}, output, cancel)[0]
-        text = f"{args[0]}: {result.status} ({result.code})"
+        if args[0] == "milvus_token":
+            if ctx.vector_store is None:
+                raise UsageError("Milvus is unavailable; check URI, service status, and token")
+            detail = ctx.vector_store.validate()
+            text = f"milvus_token: ok (collections={detail['collection_count']})"
+        else:
+            service_by_credential = {
+                "llm_api_key": "llm", "embedding_api_key": "embedding", "vlm_api_key": "vlm",
+                "reranker_api_key": "reranker", "mineru_api_key": "mineru", "tavily_api_key": "web",
+            }
+            result = ctx.connectivity.test_services({service_by_credential[args[0]]}, output, cancel)[0]
+            text = f"{args[0]}: {result.status} ({result.code})"
     else:
         raise UsageError("Usage: /secret [status|set|delete|test] ...")
     output.emit(OutputEvent(EventKind.RESULT, text=text))
@@ -115,6 +121,6 @@ def setup(ctx, args, output, cancel, router):
 
 
 def register(router) -> None:
-    router.register(CommandSpec("setup", "Guided cloud API configuration", "/setup", setup, group="Settings"))
+    router.register(CommandSpec("setup", "Configure cloud APIs", "/setup", setup, group="Main", primary=True))
     router.register(CommandSpec("config", "View or change non-secret configuration", "/config [list|get|set|unset|test] ...", config, group="Settings"))
     router.register(CommandSpec("secret", "Manage cloud credentials securely", "/secret set <name> | status | delete <name> | test <name>", secret, group="Settings"))

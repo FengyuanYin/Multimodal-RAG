@@ -15,14 +15,19 @@ from ..errors import CancelledError, ConfigurationError
 from ..models import ChunkRecord, DocumentRecord, EventKind, MediaRecord, OutputEvent, ParsedDocument
 from ..parsers import parse_local
 from ..security import safe_filename
+from ..rag_presets import get_preset
+from ...processing.chunker import get_chunker
+from .index_preparation import IndexPreparationService
 
 
 class IngestionService:
-    CHUNKER_VERSION = "recursive-v1"
+    CHUNKER_VERSION = "recursive-v2"
 
-    def __init__(self, knowledge, paths, config, *, embedding_client=None, vlm_client=None, state=None) -> None:
+    def __init__(self, knowledge, paths, config, *, vector_store=None, embedding_client=None, vlm_client=None, state=None, index_preparation=None, artifact_service=None) -> None:
         self.knowledge, self.paths, self.config = knowledge, paths, config
         self.embedding_client, self.vlm_client, self.state = embedding_client, vlm_client, state
+        self.index_preparation = index_preparation or IndexPreparationService(knowledge, vector_store=vector_store, embedding_client=embedding_client, batch_delay_seconds=float(config.embedding_batch_delay_seconds))
+        self.artifact_service = artifact_service
 
     @staticmethod
     def _emit(output, task_id: str, phase: str, text: str, completed: int = 0, total: int = 0) -> None:
@@ -92,7 +97,10 @@ class IngestionService:
                     break
 
     def _commit(self, parsed: ParsedDocument, source: str, source_type: str, category: str, task_id: str, output, cancel: CancellationToken, *, fingerprint_bytes: bytes) -> dict:
-        fingerprint = hashlib.sha256(source.encode("utf-8") + b"\0" + fingerprint_bytes).hexdigest()
+        fingerprint_input = source.encode("utf-8") + b"\0" + fingerprint_bytes
+        if category != "default":
+            fingerprint_input = category.encode("utf-8") + b"\0" + fingerprint_input
+        fingerprint = hashlib.sha256(fingerprint_input).hexdigest()
         existing = self.knowledge.get_by_fingerprint(fingerprint)
         if existing:
             return {"status": "duplicate", "document_id": existing["id"], "message": f"Already imported: {existing['title']}"}
@@ -102,51 +110,71 @@ class IngestionService:
         self._emit(output, task_id, "chunk", "Creating deterministic chunks")
         chunks = self._chunk(parsed, document_id, source, category, cancel)
         stored_paths: list[Path] = []
+        facts_committed = False
         try:
             media = self._store_media(parsed, document_id, stored_paths, cancel)
-            embeddings = []
-            if self.config.retrieval_mode in {"vector", "hybrid", "multimodal"}:
-                if not self.embedding_client:
-                    raise ConfigurationError("Cloud embedding is required for the selected retrieval mode")
-                self._emit(output, task_id, "embedding", f"Embedding {len(chunks)} chunks in the cloud")
-                vectors = self.embedding_client.embeddings([item.text for item in chunks], cancel)
-                if len(vectors) != len(chunks):
-                    raise ConfigurationError("Embedding result count does not match chunks")
-                embeddings = [(item.id, "chunk", self.embedding_client.profile_fingerprint, vector) for item, vector in zip(chunks, vectors)]
             cancel.checkpoint()
             self._emit(output, task_id, "commit", "Committing knowledge transaction")
             document = DocumentRecord(document_id, fingerprint, parsed.title, source, source_type, category, parsed.parser, len(parsed.pages), "ready", {"chunker_version": self.CHUNKER_VERSION})
-            self.knowledge.commit_document(document, chunks, media, embeddings)
-            return {"status": "success", "document_id": document_id, "chunk_count": len(chunks), "media_count": len(media), "message": f"Imported {parsed.title}"}
+            self.knowledge.commit_document(document, chunks, media, [])
+            facts_committed = True
+            try:
+                artifact = self.artifact_service.save_markdown(document_id, parsed) if self.artifact_service else None
+            except Exception:
+                self.knowledge.delete_document(document_id)
+                facts_committed = False
+                raise
+            try:
+                indexes = self.index_preparation.ensure(category, get_preset(self.config.rag_mode), output, cancel, document_ids={document_id}) if self.index_preparation else {"ready": [], "degraded": []}
+            except CancelledError:
+                raise
+            except Exception as exc:
+                indexes = {"ready": [], "degraded": [{"document_id": document_id, "index": "preparation", "reason": type(exc).__name__}]}
+            return {"status": "success", "document_id": document_id, "chunk_count": len(chunks), "media_count": len(media), "markdown": bool(artifact), "markdown_source": artifact.source if artifact else "none", "indexes": indexes, "message": f"Imported {parsed.title}"}
         except Exception:
-            for path in stored_paths:
-                try:
-                    path.unlink(missing_ok=True)
-                except OSError:
-                    pass
+            if not facts_committed:
+                for path in stored_paths:
+                    try:
+                        path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
             raise
 
     def _chunk(self, parsed: ParsedDocument, document_id: str, source: str, category: str, cancel: CancellationToken) -> list[ChunkRecord]:
         chunks, sequence = [], 0
-        size, overlap = int(self.config.chunk_size), int(self.config.chunk_overlap)
+        preset = get_preset(self.config.rag_mode)
+        chunker = get_chunker(
+            "recursive",
+            chunk_size=preset.chunk_size,
+            chunk_overlap=preset.chunk_overlap,
+        )
         for page in parsed.pages:
             cancel.checkpoint()
             text = re.sub(r"\r\n?", "\n", str(page.get("text") or "")).strip()
-            cursor = 0
-            while cursor < len(text):
+            page_number = int(page.get("page") or 1)
+            page_chunks = chunker.chunk(
+                text,
+                document_id,
+                {
+                    "source": source,
+                    "category_id": category,
+                    "page": page_number,
+                    "chunker_version": self.CHUNKER_VERSION,
+                },
+            )
+            for item in page_chunks:
                 cancel.checkpoint()
-                end = min(len(text), cursor + size)
-                if end < len(text):
-                    boundary = max(text.rfind("\n\n", cursor, end), text.rfind("。", cursor, end), text.rfind(". ", cursor, end))
-                    if boundary > cursor + size // 2:
-                        end = boundary + 1
-                content = text[cursor:end].strip()
-                if content:
-                    chunks.append(ChunkRecord(f"{document_id}_chunk_{sequence:05d}", document_id, int(page.get("page") or 1), sequence, content, "text", [], {"source": source, "category_id": category, "chunker_version": self.CHUNKER_VERSION}))
-                    sequence += 1
-                if end >= len(text):
-                    break
-                cursor = max(cursor + 1, end - overlap)
+                chunks.append(ChunkRecord(
+                    f"{document_id}_chunk_{sequence:05d}",
+                    document_id,
+                    page_number,
+                    sequence,
+                    item.content,
+                    "text",
+                    [],
+                    dict(item.metadata),
+                ))
+                sequence += 1
         if not chunks:
             raise ConfigurationError("Parser produced no readable text chunks")
         return chunks
@@ -177,5 +205,9 @@ class IngestionService:
                     os.unlink(temporary)
             stored_paths.append(destination)
             media_id = f"{document_id}_{item.get('id') or f'media_{index}'}"
-            output.append(MediaRecord(media_id, document_id, int(item.get("page") or 1), str(item.get("type") or "image"), str(item.get("label") or f"media{index}"), str(item.get("caption") or ""), str(item.get("mime_type") or "application/octet-stream"), checksum, str(destination), str(item.get("quality") or "derived"), {}))
+            metadata = {
+                "logical_id": str(item.get("id") or f"media_{index}"),
+                "markdown_reference": str(item.get("archive_path") or ""),
+            }
+            output.append(MediaRecord(media_id, document_id, int(item.get("page") or 1), str(item.get("type") or "image"), str(item.get("label") or f"media{index}"), str(item.get("caption") or ""), str(item.get("mime_type") or "application/octet-stream"), checksum, str(destination), str(item.get("quality") or "derived"), metadata))
         return output

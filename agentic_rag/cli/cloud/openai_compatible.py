@@ -6,11 +6,11 @@ import base64
 import hashlib
 import json
 import math
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from ..cancellation import CancellationToken
 from ..errors import ConfigurationError, UpstreamError
-from ..models import ServiceProfile
+from ..models import ModelStreamEvent, ServiceProfile
 from .transport import HttpTransport
 
 
@@ -52,17 +52,85 @@ class OpenAICompatibleClient:
                 if isinstance(delta, str) and delta:
                     yield delta
 
-    def embeddings(self, texts: list[str], cancel: CancellationToken) -> list[list[float]]:
+    def stream_chat_events(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]], cancel: CancellationToken, *, temperature: float = 0.2, max_tokens: int | None = None) -> Iterator[ModelStreamEvent]:
+        body: dict[str, Any] = {"model": self.profile.model, "messages": messages, "tools": tools, "tool_choice": "auto", "temperature": temperature, "stream": True, "stream_options": {"include_usage": True}}
+        if max_tokens is not None:
+            body["max_tokens"] = max_tokens
+        accumulators: dict[int, dict[str, str]] = {}
+        with self.transport.stream("POST", f"{self.profile.base_url.rstrip('/')}/chat/completions", headers=self._headers(), json_body=body, cancel=cancel) as response:
+            for line in response.iter_lines():
+                cancel.checkpoint(); line = line.strip()
+                if not line or line.startswith(":") or not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    payload = json.loads(data)
+                except json.JSONDecodeError as exc:
+                    raise UpstreamError(f"{self.service} returned a malformed stream event") from exc
+                usage = payload.get("usage")
+                if isinstance(usage, dict):
+                    details = usage.get("prompt_tokens_details") or {}
+                    yield ModelStreamEvent("usage", usage={"prompt_tokens": int(usage.get("prompt_tokens") or 0), "completion_tokens": int(usage.get("completion_tokens") or 0), "cached_tokens": int(details.get("cached_tokens") or 0)})
+                for choice in payload.get("choices") or []:
+                    delta = choice.get("delta") or {}
+                    if isinstance(delta.get("content"), str):
+                        yield ModelStreamEvent("text_delta", text=delta["content"])
+                    for tool in delta.get("tool_calls") or []:
+                        index = int(tool.get("index") or 0); current = accumulators.setdefault(index, {"id":"", "name":"", "arguments":""})
+                        current["id"] += str(tool.get("id") or "")
+                        function = tool.get("function") or {}
+                        current["name"] += str(function.get("name") or "")
+                        current["arguments"] += str(function.get("arguments") or "")
+                    if choice.get("finish_reason") == "tool_calls":
+                        for index in sorted(accumulators):
+                            item = accumulators[index]
+                            try: arguments = json.loads(item["arguments"] or "{}")
+                            except json.JSONDecodeError as exc: raise UpstreamError(f"{self.service} returned malformed tool arguments") from exc
+                            if not isinstance(arguments, dict): raise UpstreamError(f"{self.service} tool arguments must be an object")
+                            yield ModelStreamEvent("tool_call", tool_call_id=item["id"], tool_name=item["name"], arguments=arguments)
+                        accumulators.clear()
+
+    def complete_json(self, messages: list[dict[str, Any]], cancel: CancellationToken, *, max_tokens: int = 1200) -> dict[str, Any]:
+        payload = self.transport.request_json(
+            "POST", f"{self.profile.base_url.rstrip('/')}/chat/completions", headers=self._headers(),
+            json_body={"model": self.profile.model, "messages": messages, "temperature": 0,
+                       "max_tokens": max_tokens, "stream": False, "response_format": {"type": "json_object"}},
+            cancel=cancel,
+        )
+        choices = payload.get("choices")
+        content = ((choices or [{}])[0].get("message") or {}).get("content") if isinstance(choices, list) else None
+        if not isinstance(content, str) or len(content) > 100_000:
+            raise UpstreamError(f"{self.service} returned an invalid JSON completion")
+        try:
+            value = json.loads(content)
+        except json.JSONDecodeError as exc:
+            raise UpstreamError(f"{self.service} returned malformed JSON") from exc
+        if not isinstance(value, dict):
+            raise UpstreamError(f"{self.service} JSON completion must be an object")
+        return value
+
+    def embeddings(
+        self,
+        texts: list[str],
+        cancel: CancellationToken,
+        *,
+        on_progress: Callable[[int, int], None] | None = None,
+        batch_delay_seconds: float = 0.0,
+    ) -> list[list[float]]:
         if not texts:
             return []
         output: list[list[float]] = []
         batch_size = max(1, min(self.profile.batch_size, 128))
         for start in range(0, len(texts), batch_size):
             cancel.checkpoint()
+            if start and batch_delay_seconds > 0:
+                self.transport.wait(batch_delay_seconds, cancel)
             batch = texts[start:start + batch_size]
             payload = self.transport.request_json(
                 "POST", f"{self.profile.base_url.rstrip('/')}/embeddings", headers=self._headers(),
-                json_body={"model": self.profile.model, "input": batch}, cancel=cancel,
+                json_body={"model": self.profile.model, "input": batch}, cancel=cancel, idempotent=True,
             )
             data = payload.get("data")
             if not isinstance(data, list) or len(data) != len(batch):
@@ -79,6 +147,8 @@ class OpenAICompatibleClient:
                 if len(vector) != expected_dimensions:
                     raise UpstreamError(f"{self.service} embedding dimensions changed within one response")
                 output.append([float(value) for value in vector])
+            if on_progress:
+                on_progress(len(output), len(texts))
         return output
 
     def probe_chat(self, cancel: CancellationToken) -> None:

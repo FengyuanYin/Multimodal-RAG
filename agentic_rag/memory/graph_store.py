@@ -119,7 +119,25 @@ class NetworkXStore(BaseGraphStore):
     def _init_graph(self):
         import networkx as nx
         self._graph = nx.MultiDiGraph()
+        self._communities = None          # 社区分区缓存；图变更时失效
         logger.info("NetworkX 图存储初始化完成")
+
+    def _community_partition(self) -> list:
+        """计算并缓存社区分区：Louvain 优先，贪心模块度兜底。
+
+        缓存让 detect_communities 与 get_community_summary 只跑一次聚类，
+        避免 query() 对每个社区各做一次全图 Louvain。
+        """
+        if self._communities is not None:
+            return self._communities
+        from networkx.algorithms.community import louvain_communities
+        try:
+            partition = list(louvain_communities(self._graph.to_undirected(), seed=42))
+        except Exception:
+            from networkx.algorithms.community import greedy_modularity_communities
+            partition = list(greedy_modularity_communities(self._graph.to_undirected()))
+        self._communities = partition
+        return partition
 
     def add_entity(self, entity: GraphEntity) -> bool:
         if not self._graph.has_node(entity.id):
@@ -129,6 +147,7 @@ class NetworkXStore(BaseGraphStore):
                 type=entity.type,
                 properties=entity.properties,
             )
+            self._communities = None          # 图变更，社区分区缓存失效
             return True
         return False
 
@@ -147,6 +166,7 @@ class NetworkXStore(BaseGraphStore):
             properties=relation.properties,
             weight=relation.weight,
         )
+        self._communities = None          # 图变更，社区分区缓存失效
         return True
 
     def get_entity(self, entity_id: str) -> Optional[GraphEntity]:
@@ -234,47 +254,117 @@ class NetworkXStore(BaseGraphStore):
 
     def detect_communities(self) -> List[GraphCommunity]:
         try:
-            # 优先使用内置 Louvain 算法（networkx>=3.0）
-            from networkx.algorithms.community import louvain_communities
-            communities = louvain_communities(self._graph.to_undirected(), seed=42)
-            result = []
-            for i, community in enumerate(communities):
-                result.append(GraphCommunity(
-                    community_id=f"community_{i:04d}",
-                    entities=list(community),
-                    summary=f"社区 {i}: {len(community)} 个实体",
-                ))
-            logger.info(f"社区检测完成: {len(result)} 个社区")
-            return result
-        except Exception:
+            partition = self._community_partition()
+        except Exception as exc:
+            logger.warning(f"社区检测失败: {exc}")
+            return []
+        result = []
+        for i, members in enumerate(partition):
             try:
-                # 降级：使用贪心模块度
-                from networkx.algorithms.community import greedy_modularity_communities
-                communities = greedy_modularity_communities(self._graph.to_undirected())
-                result = []
-                for i, community in enumerate(communities):
-                    result.append(GraphCommunity(
-                        community_id=f"community_{i:04d}",
-                        entities=list(community),
-                        summary=f"社区 {i}: {len(community)} 个实体",
-                    ))
-                return result
-            except Exception as e:
-                logger.warning(f"社区检测失败（降级方案不可用）: {e}")
-                return []
+                summary = self._rule_based_summary(members, i)
+            except Exception as exc:
+                logger.warning(f"社区 {i} 摘要生成失败: {exc}")
+                summary = f"社区 {i}: {len(members)} 个实体"
+            result.append(GraphCommunity(
+                community_id=f"community_{i:04d}",
+                entities=list(members),
+                summary=summary,
+            ))
+        logger.info(f"社区检测完成: {len(result)} 个社区")
+        return result
 
-    def get_community_summary(self, community_id: str) -> Optional[str]:
-        # 简单实现：返回社区中所有实体的名称列表
+    @staticmethod
+    def _community_index(community_id: str) -> Optional[int]:
+        """安全解析 community_NNNN → N；格式非法返回 None 而非抛异常。"""
         try:
-            from networkx.algorithms.community import louvain_communities
-            communities = list(louvain_communities(self._graph.to_undirected(), seed=42))
-            idx = int(community_id.split("_")[-1])
-            if idx < len(communities):
-                entities = [self._graph.nodes[n].get("name", n) for n in communities[idx]]
-                return f"社区包含: {', '.join(entities)}"
+            return int(str(community_id).rsplit("_", 1)[-1])
+        except (TypeError, ValueError):
+            return None
+
+    def _rule_based_summary(self, members, index: int, *, top_k: int = 8) -> str:
+        """无 LLM 的结构化社区摘要：中心实体 + 内部关联密度 + 关系/类型分布。"""
+        import networkx as nx
+        sub = self._graph.to_undirected().subgraph(members)
+
+        # 1) 中心实体：PageRank 排序（社区子图可能不连通，pagerank 自带处理），失败退化为度中心性
+        try:
+            ranked = sorted(nx.pagerank(sub).items(), key=lambda item: item[1], reverse=True)
         except Exception:
-            pass
-        return None
+            ranked = sorted(sub.degree(), key=lambda item: item[1], reverse=True)
+        core = [self._graph.nodes[nid].get("name", nid) for nid, _ in ranked[:top_k]]
+
+        # 2) 内部关系类型分布（MultiGraph 的 edges(data=True) 每条平行边单独一条）
+        relation_counts: dict[str, int] = {}
+        for _, _, data in sub.edges(data=True):
+            rel = str(data.get("relation_type") or "related_to")
+            relation_counts[rel] = relation_counts.get(rel, 0) + 1
+
+        # 3) 实体类型分布
+        type_counts: dict[str, int] = {}
+        for nid in members:
+            node_type = str(self._graph.nodes[nid].get("type") or "unknown")
+            type_counts[node_type] = type_counts.get(node_type, 0) + 1
+
+        def _top(counts: dict, limit: int = 4) -> str:
+            return "、".join(
+                f"{k}({v})" for k, v in sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:limit]
+            ) or "无"
+
+        return (
+            f"社区[{index}] 共 {len(members)} 个实体 / 内部关联 {sub.number_of_edges()} 条；"
+            f"核心实体: {'、'.join(core)}；"
+            f"主要关系: {_top(relation_counts)}；"
+            f"实体类型: {_top(type_counts)}"
+        )
+
+    def _llm_summary(self, members, index: int, llm_client, *, llm_model: str, top_k: int = 20) -> str:
+        """GraphRAG 论文式：用 LLM 生成自然语言社区摘要，失败自动回退规则版。"""
+        import networkx as nx
+        sub = self._graph.to_undirected().subgraph(members)
+        try:
+            ranked = sorted(nx.pagerank(sub).items(), key=lambda item: item[1], reverse=True)
+        except Exception:
+            ranked = sorted(sub.degree(), key=lambda item: item[1], reverse=True)
+        top_ids = [nid for nid, _ in ranked[:top_k]]
+
+        entity_lines = "\n".join(
+            f"- {self._graph.nodes[nid].get('name', nid)}（类型: {self._graph.nodes[nid].get('type', 'unknown')}）"
+            for nid in top_ids
+        )
+        relation_lines = "\n".join(
+            f"- {self._graph.nodes[u].get('name', u)} --[{data.get('relation_type', 'related_to')}]--> {self._graph.nodes[v].get('name', v)}"
+            for u, v, data in list(sub.edges(data=True))[:40]
+        )
+        prompt = (
+            "基于以下知识图谱社区信息，用中文生成一段不超过 150 字的社区摘要，"
+            "概括该社区的主题、核心成员与成员间关系。只依据给定信息，不要臆造。\n\n"
+            f"【核心实体】\n{entity_lines}\n\n【代表性关系】\n{relation_lines}"
+        )
+        try:
+            response = llm_client.chat.completions.create(
+                model=llm_model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.2,
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as exc:
+            logger.warning(f"LLM 社区摘要失败，回退规则版: {exc}")
+            return self._rule_based_summary(members, index)
+
+    def get_community_summary(self, community_id: str, *, llm_client=None,
+                              llm_model: str = "gpt-4o-mini", top_k: int = 8) -> Optional[str]:
+        """生成社区摘要：规则版（默认）或 LLM 自然语言版（传入 llm_client 时）。
+
+        复用缓存的社区分区，不再重复运行 Louvain。
+        """
+        partition = self._community_partition()
+        index = self._community_index(community_id)
+        if index is None or index >= len(partition) or not partition[index]:
+            return None
+        members = partition[index]
+        if llm_client is not None:
+            return self._llm_summary(members, index, llm_client, llm_model=llm_model, top_k=max(top_k, 10))
+        return self._rule_based_summary(members, index, top_k=top_k)
 
     def clear(self) -> bool:
         self._init_graph()
@@ -299,6 +389,7 @@ class NetworkXStore(BaseGraphStore):
                 type="chunk",
                 properties={"doc_id": doc_id, "content_preview": content_preview[:200]},
             )
+            self._communities = None          # 图变更，社区分区缓存失效
             return True
         return False
 
@@ -321,6 +412,7 @@ class NetworkXStore(BaseGraphStore):
                     **(properties or {}),
                 },
             )
+            self._communities = None          # 图变更，社区分区缓存失效
             return True
         return False
 
@@ -342,6 +434,7 @@ class NetworkXStore(BaseGraphStore):
             properties={"label": label, "page": page, "offset": offset, "media_type": media_type},
             weight=1.0,
         )
+        self._communities = None          # 图变更，社区分区缓存失效
         return True
 
     def get_media_by_chunk(self, chunk_id: str) -> List[dict]:

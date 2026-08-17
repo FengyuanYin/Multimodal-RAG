@@ -13,6 +13,7 @@ from .models import CommandResult, InputKind
 from . import __version__
 from .branding import render_startup_banner
 from .provider_presets import match_preset
+from .rag_presets import get_preset
 
 
 @contextmanager
@@ -46,10 +47,13 @@ def dispatch(text: str, ctx, output, router) -> CommandResult:
         if parsed.kind == InputKind.RAG_CHAT:
             if not parsed.question:
                 raise UsageError("Knowledge query is required", hint="Use /s <question>")
+            if getattr(ctx, "index_preparation", None):
+                ctx.index_preparation.ensure(ctx.config.active_category, get_preset(ctx.config.rag_mode), output, token)
             result = ctx.grounded_chat.stream(ctx.current_conversation, parsed.question, output, token)
             ctx.last_trace = result.get("metadata", {}).get("retrieval_trace", {})
             return CommandResult(data=result)
-        result = ctx.direct_chat.stream(ctx.current_conversation, parsed.question, output, token)
+        workspace = ctx.state.workspaces.active_for_conversation(ctx.current_conversation) if hasattr(ctx.state, "workspaces") else None
+        result = ctx.document_workspace_chat.stream(workspace["id"], parsed.question, output, token) if workspace else ctx.direct_chat.stream(ctx.current_conversation, parsed.question, output, token)
         return CommandResult(data=result)
 
 
@@ -79,7 +83,9 @@ def run_repl(ctx, output, router, *, debug: bool = False) -> int:
     provider = preset.label if preset else "Custom OpenAI-compatible"
     summary = f"{provider} / {ctx.config.llm.model}" if credential_ready else "LLM not configured"
     width = shutil.get_terminal_size((80, 24)).columns
-    output.stdout.write(render_startup_banner(width=width, color=output.color, version=__version__, llm_summary=summary, needs_setup=not credential_ready))
+    bases = ctx.knowledge.list_knowledge_bases() if hasattr(ctx, "knowledge") else []
+    active = next((item["name"] for item in bases if item["id"] == ctx.config.active_category), ctx.config.active_category)
+    output.stdout.write(render_startup_banner(width=width, color=output.color, version=__version__, llm_summary=summary, needs_setup=not credential_ready, knowledge_base=active, rag_mode=ctx.config.rag_mode))
     output.stdout.flush()
     last_idle_interrupt = 0.0
     while True:

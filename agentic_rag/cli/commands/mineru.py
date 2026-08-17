@@ -9,7 +9,7 @@ from .utils import pop_flag, pop_option, require_count
 
 def mineru(ctx, args, output, cancel, router):
     args = list(args)
-    category = str(pop_option(args, "--category", "default"))
+    category = str(pop_option(args, "--category", ctx.config.active_category))
     selfhost = pop_flag(args, "--selfhost")
     require_count(args, 1, "/mineru <pdf-path> [--category id] [--selfhost]")
     path = Path(args[0]).expanduser().resolve()

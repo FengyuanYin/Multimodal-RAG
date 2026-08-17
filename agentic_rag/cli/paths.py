@@ -21,6 +21,8 @@ class AutoMemoryPaths:
     exports_dir: Path
     cache_dir: Path
     backups_dir: Path
+    knowledge_assets_dir: Path
+    workspaces_dir: Path
 
     @classmethod
     def resolve(cls, root: str | Path | None = None, *, create: bool = True) -> "AutoMemoryPaths":
@@ -43,9 +45,11 @@ class AutoMemoryPaths:
             exports_dir=base / "exports",
             cache_dir=base / "cache",
             backups_dir=base / "backups",
+            knowledge_assets_dir=base / "knowledge-assets",
+            workspaces_dir=base / "workspaces",
         )
         if create:
-            for directory in (base, paths.media_dir, paths.logs_dir, paths.exports_dir, paths.cache_dir, paths.backups_dir):
+            for directory in (base, paths.media_dir, paths.logs_dir, paths.exports_dir, paths.cache_dir, paths.backups_dir, paths.knowledge_assets_dir, paths.workspaces_dir):
                 directory.mkdir(parents=True, exist_ok=True)
             probe = base / ".write-test"
             try:

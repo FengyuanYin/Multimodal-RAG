@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from agentic_rag.cli.errors import UsageError
-from agentic_rag.cli.models import ChunkRecord, DocumentRecord
+from agentic_rag.cli.models import ChunkRecord, DocumentRecord, MediaRecord
 from agentic_rag.cli.storage import KnowledgeRepository, StateRepository
 
 
@@ -36,13 +36,34 @@ def test_memory_rejects_credentials(tmp_path: Path) -> None:
     state.close()
 
 
-def test_knowledge_document_and_vector_roundtrip(tmp_path: Path) -> None:
+def test_knowledge_document_roundtrip_does_not_store_vectors(tmp_path: Path) -> None:
     knowledge = KnowledgeRepository(tmp_path / "knowledge.db", tmp_path / "backups")
     document = DocumentRecord("doc_1", "fingerprint", "Paper", "paper.txt", "text", "default", "text", 1, "ready")
     chunk = ChunkRecord("chunk_1", "doc_1", 1, 0, "industrial retrieval evidence")
-    knowledge.commit_document(document, [chunk], [], [("chunk_1", "chunk", "profile", [3.0, 4.0])])
+    knowledge.commit_document(document, [chunk], [])
     item = knowledge.get_document("doc_1")
     assert item and item["chunks"][0]["text"] == chunk.text
-    vector = knowledge.list_embeddings("profile")[0]["vector"]
-    assert vector == pytest.approx([0.6, 0.8])
+    tables = {row[0] for row in knowledge._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "embeddings" not in tables
+    knowledge.close()
+
+
+def test_media_vlm_analysis_cache_is_scoped_and_cascades(tmp_path: Path) -> None:
+    knowledge = KnowledgeRepository(tmp_path / "knowledge.db", tmp_path / "backups")
+    document = DocumentRecord("doc_vlm", "fp_vlm", "Visual", "visual.pdf", "pdf", "default", "text", 1, "ready")
+    chunk = ChunkRecord("chunk_vlm", "doc_vlm", 1, 0, "see figure")
+    media = MediaRecord("image_vlm", "doc_vlm", 1, "image", "Figure 1", checksum="checksum-a", storage_path="image.png")
+    knowledge.commit_document(document, [chunk], [media])
+    analysis = {"media_id": "image_vlm", "image_type": "other", "content": "visible facts"}
+
+    knowledge.upsert_media_vlm_analysis("image_vlm", "checksum-a", "profile-a", "prompt-v1", analysis)
+
+    assert knowledge.get_media_vlm_analysis("image_vlm", "checksum-a", "profile-a", "prompt-v1") == analysis
+    assert knowledge.get_media_vlm_analysis("image_vlm", "checksum-b", "profile-a", "prompt-v1") is None
+    assert knowledge.get_media_vlm_analysis("image_vlm", "checksum-a", "profile-b", "prompt-v1") is None
+    assert knowledge.get_media_vlm_analysis("image_vlm", "checksum-a", "profile-a", "prompt-v2") is None
+    assert knowledge._conn.execute("PRAGMA user_version").fetchone()[0] == 5
+
+    knowledge.delete_document("doc_vlm")
+    assert knowledge._conn.execute("SELECT count(*) FROM media_vlm_analyses").fetchone()[0] == 0
     knowledge.close()

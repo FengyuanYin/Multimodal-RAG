@@ -142,6 +142,12 @@ class MinerUClient:
         content_name = next((name for name in names if name.endswith("_content_list.json")), None)
         pages: dict[int, list[str]] = {}
         media = []
+        markdown_names = sorted(
+            (name for name in names if name.lower().endswith(".md") and names[name].file_size > 0),
+            key=lambda name: (-names[name].file_size, name),
+        )
+        markdown_text = bundle.read(markdown_names[0]).decode("utf-8", errors="replace").strip() if markdown_names else ""
+        markdown_refs: list[dict[str, str]] = []
         if content_name:
             try:
                 items = json.loads(bundle.read(content_name).decode("utf-8"))
@@ -162,16 +168,19 @@ class MinerUClient:
                     info = names.get(candidate) or names.get(image_path)
                     if info and info.file_size <= 8 * 1024 * 1024:
                         raw = bundle.read(info)
-                        media.append({"id": f"figure_{sequence}_p{page}", "page": page, "type": "image", "label": f"figure{sequence}", "caption": caption, "data": base64.b64encode(raw).decode("ascii"), "mime_type": mimetypes.guess_type(info.filename)[0] or "image/png", "quality": "exact"})
+                        media_id = f"figure_{sequence}_p{page}"
+                        media.append({"id": media_id, "page": page, "type": "image", "label": f"figure{sequence}", "caption": caption, "data": base64.b64encode(raw).decode("ascii"), "mime_type": mimetypes.guess_type(info.filename)[0] or "image/png", "quality": "exact", "archive_path": info.filename})
+                        markdown_refs.append({"reference": image_path, "media_id": media_id})
         if not pages:
-            markdown = [name for name in names if name.lower().endswith(".md")]
-            if not markdown:
+            if not markdown_text:
                 raise UpstreamError("MinerU archive contains no readable content")
-            text = bundle.read(max(markdown, key=lambda name: names[name].file_size)).decode("utf-8", errors="replace").strip()
-            if not text:
-                raise UpstreamError("MinerU Markdown result is empty")
-            pages[1] = [text]
-        return ParsedDocument(title, [{"page": page, "text": "\n\n".join(parts)} for page, parts in sorted(pages.items())], media, parser)
+            pages[1] = [markdown_text]
+        if not markdown_text:
+            markdown_text = self._pages_to_markdown(title, pages)
+            markdown_source = "generated"
+        else:
+            markdown_source = "mineru_original"
+        return ParsedDocument(title, [{"page": page, "text": "\n\n".join(parts)} for page, parts in sorted(pages.items())], media, parser, markdown_text, markdown_source, markdown_refs)
 
     @staticmethod
     def normalize_payload(payload: dict, title: str, parser: str) -> ParsedDocument:
@@ -186,7 +195,19 @@ class MinerUClient:
         pages = [item for item in pages if item["text"].strip()]
         if not pages:
             raise UpstreamError("Self-hosted MinerU returned empty content")
-        return ParsedDocument(title, pages, list(payload.get("media") or []), parser)
+        markdown = str(payload.get("markdown") or "").strip()
+        source = "mineru_original" if markdown else "generated"
+        if not markdown:
+            grouped = {int(item["page"]): [str(item["text"])] for item in pages}
+            markdown = MinerUClient._pages_to_markdown(title, grouped)
+        return ParsedDocument(title, pages, list(payload.get("media") or []), parser, markdown, source)
+
+    @staticmethod
+    def _pages_to_markdown(title: str, pages: dict[int, list[str]]) -> str:
+        output = [f"# {title}"]
+        for page, parts in sorted(pages.items()):
+            output.extend(["", f"<!-- AutoMemory page: {page} -->", "", "\n\n".join(parts).strip()])
+        return "\n".join(output).strip() + "\n"
 
     def close(self) -> None:
         self.transport.close()

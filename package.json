@@ -1,0 +1,16 @@
+{
+  "name": "multimodal-rag-pages",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:unit": "node --test web-tests/unit/*.test.js",
+    "test:e2e": "playwright test web-tests/e2e",
+    "test:a11y": "playwright test web-tests/a11y",
+    "test": "npm run test:unit",
+    "serve": "python -m http.server 4173 -d web"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1",
+    "fake-indexeddb": "6.0.1"
+  }
+}
