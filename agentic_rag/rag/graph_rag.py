@@ -258,7 +258,11 @@ class GraphRAGEngine:
             try:
                 communities = self.graph_store.detect_communities()
                 for comm in communities[:3]:
-                    summary = self.graph_store.get_community_summary(comm.community_id)
+                    summary = self.graph_store.get_community_summary(
+                        comm.community_id,
+                        llm_client=self.llm_client,
+                        llm_model=self.llm_model,
+                    )
                     if summary:
                         community_context += f"\n{summary}"
             except Exception as e:

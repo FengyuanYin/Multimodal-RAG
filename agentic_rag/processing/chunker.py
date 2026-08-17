@@ -28,6 +28,12 @@ class TextChunker:
         chunk_overlap: int = 128,
         separators: Optional[List[str]] = None,
     ):
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be positive")
+        if chunk_overlap < 0:
+            raise ValueError("chunk_overlap must not be negative")
+        if chunk_overlap >= chunk_size:
+            raise ValueError("chunk_overlap must be smaller than chunk_size")
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
         self.separators = separators or ["\n\n", "\n", "。", ".", " ", ""]
@@ -37,14 +43,14 @@ class TextChunker:
         chunks = []
         metadata = metadata or {}
 
-        # 递归分割
-        texts = self._recursive_split(text)
+        base_chunks = self._recursive_split(text, self.separators)
+        texts = self._apply_overlap(base_chunks)
 
         for i, chunk_text in enumerate(texts):
             chunk = DocumentChunk(
                 chunk_id=f"{doc_id}_chunk_{i:04d}",
                 doc_id=doc_id,
-                content=chunk_text.strip(),
+                content=chunk_text,
                 metadata={
                     **metadata,
                     "chunk_index": i,
@@ -55,50 +61,103 @@ class TextChunker:
 
         return chunks
 
-    def _recursive_split(self, text: str) -> List[str]:
-        """递归分割实现"""
-        if len(text) <= self.chunk_size:
+    def _recursive_split(self, text: str, separators: Optional[List[str]] = None) -> List[str]:
+        """按结构从粗到细递归拆分为无重叠的基础块。"""
+        separators = list(self.separators if separators is None else separators)
+        target_size = self.chunk_size - self.chunk_overlap
+        if len(text) <= target_size:
             return [text] if text.strip() else []
 
-        for sep in self.separators:
-            if sep == "":
-                # 按字符数硬切
-                return self._hard_split(text)
-            if sep in text:
-                segments = text.split(sep)
-                result = []
-                current = ""
-                for seg in segments:
-                    candidate = current + sep + seg if current else seg
-                    if len(candidate) <= self.chunk_size:
-                        current = candidate
-                    else:
-                        if current:
-                            result.append(current)
-                        current = seg
-                if current:
-                    result.append(current)
-                # 如果结果块仍然太大，递归处理
-                final = []
-                for r in result:
-                    if len(r) > self.chunk_size:
-                        final.extend(self._recursive_split(r))
-                    else:
-                        final.append(r)
-                return final
+        selected_index = -1
+        selected_separator = ""
+        for index, separator in enumerate(separators):
+            if separator == "" or separator in text:
+                selected_index = index
+                selected_separator = separator
+                break
 
-        return self._hard_split(text)
+        if selected_index < 0 or selected_separator == "":
+            return self._hard_split(text)
 
-    def _hard_split(self, text: str) -> List[str]:
-        """按字符数硬切，带重叠"""
-        chunks = []
+        remaining = separators[selected_index + 1:]
+        parts = self._split_preserving_separator(text, selected_separator)
+        units: List[str] = []
+        for part in parts:
+            if not part:
+                continue
+            if len(part) > target_size:
+                units.extend(self._recursive_split(part, remaining))
+            else:
+                units.append(part)
+        return self._merge_splits(units)
+
+    @staticmethod
+    def _split_preserving_separator(text: str, separator: str) -> List[str]:
+        """在每个片段末尾保留匹配到的分隔符。"""
+        if not separator:
+            return [text]
+        parts: List[str] = []
         start = 0
         while start < len(text):
-            end = min(start + self.chunk_size, len(text))
-            chunks.append(text[start:end])
-            start += self.chunk_size - self.chunk_overlap
-            if start >= len(text):
+            index = text.find(separator, start)
+            if index < 0:
+                parts.append(text[start:])
                 break
+            end = index + len(separator)
+            parts.append(text[start:end])
+            start = end
+        return parts
+
+    def _merge_splits(self, parts: List[str]) -> List[str]:
+        """在有效载荷上限内合并递归产生的小片段。"""
+        target_size = self.chunk_size - self.chunk_overlap
+        output: List[str] = []
+        current = ""
+        for part in parts:
+            if not part:
+                continue
+            if current and len(current) + len(part) > target_size:
+                if current.strip():
+                    output.append(current)
+                current = ""
+            if len(part) > target_size:
+                if current.strip():
+                    output.append(current)
+                    current = ""
+                output.extend(self._hard_split(part))
+            else:
+                current += part
+        if current.strip():
+            output.append(current)
+        return output
+
+    def _apply_overlap(self, chunks: List[str]) -> List[str]:
+        """给基础块添加前一段尾部上下文，同时保持最终大小上限。"""
+        if not chunks or self.chunk_overlap == 0:
+            return [item for item in chunks if item.strip()]
+        output: List[str] = []
+        history = ""
+        for chunk in chunks:
+            if not chunk.strip():
+                history += chunk
+                continue
+            prefix = history[-self.chunk_overlap:] if history else ""
+            combined = prefix + chunk
+            if len(combined) > self.chunk_size:
+                combined = combined[-self.chunk_size:]
+            output.append(combined)
+            history += chunk
+        return output
+
+    def _hard_split(self, text: str) -> List[str]:
+        """按有效载荷大小硬切；统一 overlap 在最终阶段添加。"""
+        chunks = []
+        start = 0
+        step = self.chunk_size - self.chunk_overlap
+        while start < len(text):
+            end = min(start + step, len(text))
+            chunks.append(text[start:end])
+            start = end
         return chunks
 
 

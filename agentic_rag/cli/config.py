@@ -12,10 +12,11 @@ from typing import Any
 
 from .errors import ConfigurationError
 from .models import ServiceProfile
+from .rag_presets import get_preset, migrate_retrieval_mode
 from .security import looks_secret_name, validate_http_url
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 4
 
 
 def _default_llm() -> ServiceProfile:
@@ -44,14 +45,34 @@ class AutoMemoryConfig:
     mineru_mode: str = "official"
     mineru_url: str = "https://mineru.net/api/v4"
     web_provider: str = "duckduckgo"
-    retrieval_mode: str = "keyword"
+    rag_mode: str = "balanced"
+    retrieval_mode: str = "hybrid"
     top_k: int = 5
     candidate_k: int = 25
     chunk_size: int = 800
     chunk_overlap: int = 120
+    embedding_batch_delay_seconds: float = 1.0
     memory_enabled: bool = True
-    active_category: str = "all"
+    active_category: str = "default"
     max_vector_items: int = 50_000
+    milvus_uri: str = "http://localhost:19530"
+    milvus_database: str = "default"
+    milvus_collection: str = "automemory_vectors"
+    milvus_timeout_seconds: float = 10.0
+    document_context_window_tokens: int = 1_000_000
+    document_max_input_tokens: int = 920_000
+    document_output_reserve_tokens: int = 32_000
+    document_safety_reserve_tokens: int = 48_000
+    document_compaction_trigger_tokens: int = 850_000
+    document_compaction_target_tokens: int = 780_000
+    document_summary_max_tokens: int = 12_000
+    document_recent_turns: int = 6
+    document_long_answer_tokens: int = 12_000
+    document_preview_head_tokens: int = 1_500
+    document_preview_tail_tokens: int = 1_500
+    document_tool_round_limit: int = 8
+    document_vlm_call_limit: int = 4
+    document_write_call_limit: int = 3
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -66,11 +87,21 @@ class AutoMemoryConfig:
         scalar_fields = {
             "mineru_mode", "mineru_url", "web_provider", "retrieval_mode", "top_k",
             "candidate_k", "chunk_size", "chunk_overlap", "memory_enabled",
-            "active_category", "max_vector_items",
+            "active_category", "max_vector_items", "embedding_batch_delay_seconds", "rag_mode",
+            "milvus_uri", "milvus_database", "milvus_collection", "milvus_timeout_seconds",
+            "document_context_window_tokens", "document_max_input_tokens", "document_output_reserve_tokens",
+            "document_safety_reserve_tokens", "document_compaction_trigger_tokens", "document_compaction_target_tokens",
+            "document_summary_max_tokens", "document_recent_turns", "document_long_answer_tokens",
+            "document_preview_head_tokens", "document_preview_tail_tokens", "document_tool_round_limit",
+            "document_vlm_call_limit", "document_write_call_limit",
         }
         for name in scalar_fields:
             if name in value:
                 setattr(base, name, value[name])
+        if "rag_mode" not in value:
+            base.rag_mode = migrate_retrieval_mode(str(value.get("retrieval_mode", "hybrid")))
+        if base.active_category == "all":
+            base.active_category = "default"
         base.llm = ServiceProfile.from_dict(value.get("llm", {}), _default_llm())
         base.embedding = ServiceProfile.from_dict(value.get("embedding", {}), _default_embedding())
         base.vlm = ServiceProfile.from_dict(value.get("vlm", {}), _default_vlm())
@@ -79,6 +110,7 @@ class AutoMemoryConfig:
 
 
 def validate_config(config: AutoMemoryConfig) -> AutoMemoryConfig:
+    get_preset(config.rag_mode)
     if config.retrieval_mode not in {"keyword", "vector", "hybrid", "multimodal"}:
         raise ConfigurationError("retrieval_mode must be keyword, vector, hybrid, or multimodal")
     if config.web_provider not in {"duckduckgo", "tavily"}:
@@ -93,6 +125,26 @@ def validate_config(config: AutoMemoryConfig) -> AutoMemoryConfig:
         raise ConfigurationError("chunk_size must be between 64 and 8192")
     if not 0 <= int(config.chunk_overlap) < int(config.chunk_size):
         raise ConfigurationError("chunk_overlap must be smaller than chunk_size")
+    if not 0 <= float(config.embedding_batch_delay_seconds) <= 30:
+        raise ConfigurationError("embedding_batch_delay_seconds must be between 0 and 30")
+    validate_http_url(config.milvus_uri, allow_private=True, resolve=False)
+    if not config.milvus_database.strip():
+        raise ConfigurationError("milvus_database is required")
+    if not config.milvus_collection.strip() or len(config.milvus_collection) > 220:
+        raise ConfigurationError("milvus_collection must be between 1 and 220 characters")
+    if not 0.1 <= float(config.milvus_timeout_seconds) <= 600:
+        raise ConfigurationError("milvus_timeout_seconds must be between 0.1 and 600")
+    if config.document_max_input_tokens + config.document_output_reserve_tokens + config.document_safety_reserve_tokens > config.document_context_window_tokens:
+        raise ConfigurationError("Document input, output, and safety budgets exceed the context window")
+    if not config.document_compaction_target_tokens < config.document_compaction_trigger_tokens < config.document_max_input_tokens:
+        raise ConfigurationError("Document compaction target, trigger, and input limit are invalid")
+    if config.document_preview_head_tokens + config.document_preview_tail_tokens >= config.document_long_answer_tokens:
+        raise ConfigurationError("Document answer previews must be smaller than the long-answer threshold")
+    if not 1 <= config.document_recent_turns <= 20:
+        raise ConfigurationError("document_recent_turns must be between 1 and 20")
+    for name in ("document_tool_round_limit", "document_vlm_call_limit", "document_write_call_limit"):
+        if not 1 <= int(getattr(config, name)) <= 32:
+            raise ConfigurationError(f"{name} must be between 1 and 32")
     for name in ("llm", "embedding", "vlm", "reranker"):
         profile = getattr(config, name)
         validate_http_url(profile.base_url, allow_private=True, resolve=False)

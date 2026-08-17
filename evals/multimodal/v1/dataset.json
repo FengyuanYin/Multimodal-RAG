@@ -1,0 +1,16 @@
+[
+  {
+    "id": "mm-001",
+    "query": "华东区域的收入趋势如何？",
+    "expected": ["fixture_text_revenue"],
+    "expected_media": ["fixture_chart_revenue"],
+    "tags": ["image", "cross-modal"]
+  },
+  {
+    "id": "mm-002",
+    "query": "各区域收入分别是多少？",
+    "expected": ["fixture_table_regions"],
+    "expected_media": ["fixture_table_regions"],
+    "tags": ["table", "media-derived-text"]
+  }
+]

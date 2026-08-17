@@ -51,6 +51,44 @@ The wizard supports OpenAI, DeepSeek, SiliconFlow, and custom OpenAI-compatible 
 
 Values remain in memory until the final confirmation. `back`, `skip`, and `cancel` are available during setup. After saving, AutoMemory can issue a real, minimal connection test and distinguish authentication, quota/rate-limit, network, model, and malformed-response failures. A failed test does not delete the saved configuration.
 
+### Recommended workflow and fixed RAG modes
+
+```text
+/setup
+/mode balanced
+/kb create "My research"
+/add "D:\Documents\paper.pdf"
+/docs
+/s What method does the paper propose?
+```
+
+`/mode` exposes four product presets; their internal chunk, candidate, fusion, and window parameters are fixed so users do not need to assemble an algorithm manually.
+
+| Mode | Retrieval pipeline |
+|---|---|
+| `fast` | BM25 only; fastest and requires no embedding API. |
+| `balanced` | BM25 + cloud embedding; the default for new installations. |
+| `multimodal` | Balanced plus figures, tables, captions, and the document/page/media reference graph. |
+| `advanced` | Query rewriting, BM25, embedding, multimodal evidence, entity GraphRAG, reference graph, stable RRF fusion, cloud reranking, post-rerank VLM image routing, then adjacent regular-chunk context expansion. It does not build an extra small-chunk index. |
+
+### Cost-aware Advanced VLM routing
+
+Automatic image understanding is exclusive to `advanced`. AutoMemory first completes retrieval, fusion, cloud reranking, and final top-k selection. It then takes every unique image referenced by those final chunks—there is no image-count cap—and sends only uncached images to the configured VLM. Images attached only to candidates eliminated by reranking never incur a VLM call.
+
+One primary call classifies and reconstructs each image: data charts become Markdown tables, structure diagrams become Mermaid text, and other images become factual visual descriptions. A second general-vision call is made only when chart-table or Mermaid validation fails. Successful results are cached by media checksum, VLM profile, and prompt version, so later queries and process restarts can reuse them without another call. Individual image failures are recorded in `trace.advanced_vlm` and do not discard the selected text evidence.
+
+Use `/kb` to list knowledge bases. `/kb create <name>` creates and selects one; `/kb use <id-or-name>` switches; `/kb rename ...` renames; `/kb delete ...` deletes after confirmation. `/add`, `/docs`, `/remove`, `/s`, and `/graph` always use the current knowledge base. Existing categories are retained as knowledge bases during upgrade.
+
+Advanced graph data can be exported without a GUI:
+
+```text
+/graph                         # combined graph
+/graph entity entities.png
+/graph reference references.png
+```
+
+Each export writes a Matplotlib PNG and a same-name JSON provenance file under the AutoMemory exports directory. Large graphs produce a deterministic readable subgraph and report the original/exported node and edge counts.
+
 ### Chat and commands
 
 Commands use Windows-friendly tokenization. Wrap paths or names containing spaces in double quotes. An ID may be shortened to a unique prefix. Options in `[brackets]` are optional; `--force` and `--yes` skip interactive confirmation.
@@ -60,14 +98,14 @@ Commands use Windows-friendly tokenization. Wrap paths or names containing space
 | Input | Meaning | Output |
 |---|---|---|
 | `<message>` | Direct cloud-LLM chat. The knowledge base is not searched. | A streamed answer; the user and assistant messages are saved in the active conversation. |
-| `/s <question>` | Search the local knowledge base using the configured retrieval mode, then ask the cloud LLM with retrieved context. `/s` must be the exact lowercase first token. | A streamed grounded answer, numbered sources, and a retrieval trace available through `/trace`. |
+| `/s <question>` | Search only the current knowledge base with the selected fixed mode, then ask the cloud LLM with retrieved context. `/s` must be the exact lowercase first token. | A streamed grounded answer, numbered sources, and a retrieval trace available through `/trace`. |
 
 #### Core and diagnostics
 
 | Command and input | Meaning | Output / side effect |
 |---|---|---|
-| `/help [command]` or `/? [command]` | List commands, or show usage for one command. | Grouped command list or one usage line. |
-| `/version` | Show the running AutoMemory version. | `AutoMemory 0.3.0`. |
+| `/help`, `/help all`, or `/help <command>` | Show the ten primary commands, all compatibility commands, or one command's usage. | A concise default view or the complete advanced command list. |
+| `/version` | Show the running AutoMemory version. | `AutoMemory 0.4.0`. |
 | `/diagnose [--errors]` | Check local databases, data directory, cloud credential presence, and required CLI dependencies. `--errors` also includes recent redacted errors from this process. | One `OK`, `DEGRADED`, or `ERROR` line per check; no secret values. It does not make provider API calls. |
 | `/path` | Show the isolated data locations used by this process. | Home, exports, and logs paths. |
 | `/exit` or `/quit` | Close the REPL after the current command returns. | Clean process exit; databases and clients are closed. |
@@ -91,25 +129,31 @@ Commands use Windows-friendly tokenization. Wrap paths or names containing space
 
 | Command and input | Meaning | Output / side effect |
 |---|---|---|
-| `/add <path> [path...] [--category id] [--vlm]` | Import one or more local PDF, text/Markdown, image, or spreadsheet files. `--vlm` asks the configured cloud vision model to caption extracted images. | Parse/chunk/embed progress, one imported-or-duplicate result per file, and a rebuilt retrieval index. |
-| `/docs [--category id]` | List all documents, or only one category. | Document ID, title, source type/parser, status, chunk/media counts, and category. |
+| `/mode [fast\|balanced\|multimodal\|advanced]` | List or select one fixed RAG preset. | Persisted current mode and any derived-index preparation progress. |
+| `/kb [list\|create\|use\|rename\|delete] ...` | Manage and select knowledge bases. Creating a base selects it automatically. | Knowledge-base IDs, names, document counts, and current marker. |
+| `/add <path> [path...] [--vlm]` | Import one or more local PDF, text/Markdown, image, or spreadsheet files into the current knowledge base. | Parse/chunk/index progress and imported-or-duplicate result per file. |
+| `/docs` | List documents in the current knowledge base. | Document ID, title, parser, status, and chunk/media counts. |
 | `/doc <document-id>` | Inspect one document using a full ID or unique prefix. | Title, source, parser, status, pages, chunks, and media counts. |
-| `/remove <document-id> [--force]` | Delete a document, its chunks, embeddings, and stored media, then rebuild the index. | Confirmation prompt unless forced, followed by the deleted document ID. |
-| `/category` or `/category list` | List knowledge categories. | Category IDs and names. |
+| `/remove <document-id> [--force]` | Delete a current-base document, its chunks, embeddings, dual-graph records, and stored media. | Confirmation prompt unless forced, followed by the deleted document ID. |
+| `/graph [entity\|reference\|combined] [filename.png]` | Export the current knowledge base graph with Matplotlib Agg. | PNG, same-name provenance JSON, and graph size statistics. |
+| `/category` or `/category list` | Legacy compatibility alias for the underlying knowledge-base categories; prefer `/kb`. | Category IDs and names. |
 | `/category add <name>` | Create a category. | New category ID and name. |
 | `/category rename <id> <name>` | Rename a category. | Renamed category ID. |
 | `/category delete <id> [--force]` | Delete an empty category. Documents must be removed or moved first. | Confirmation prompt unless forced, then deleted category ID. |
-| `/reindex` | Rebuild the derived keyword index from stored chunks. | Number of indexed chunks. It does not reparse source files. |
+| `/reindex [--force]` | Rebuild keyword and Milvus vector indexes from stored chunks; `--force` recreates only AutoMemory-managed Milvus collections. | Keyword count plus vector-ready/degraded counts. It does not reparse source files. |
 | `/trace` | Show details of the most recent `/s` retrieval in the current process. | JSON containing retrieval mode, channels, scores, fallbacks, and scope; otherwise a “no RAG query” message. |
 | `/export <media-id> [filename]` | Copy a stored media asset to AutoMemory's exports directory. | Absolute exported file path. The optional filename is sanitized. |
-| `/mineru <pdf-path> [--category id] [--selfhost]` | Parse a PDF through the configured MinerU service; `--selfhost` overrides the saved mode for this command. | Upload/poll/download/ingestion progress, imported document summary, task status, and rebuilt index. |
+| `/mineru <pdf-path> [--category id] [--selfhost]` | Parse a PDF through the configured MinerU service and import it into the current knowledge base by default; `--category` overrides the target and `--selfhost` overrides the saved parser mode for this command. | Upload/poll/download/ingestion progress, imported document summary, task status, and rebuilt index. |
+| `/context open <document-id>` | Open one MinerU document as an isolated full-Markdown workspace. Normal messages then use the complete immutable Markdown with the main LLM; `/s` remains knowledge retrieval. | Workspace ID, Markdown source/size, document and main model. |
+| `/context status\|leave\|clear` | Inspect, leave, or clear the active full-document workspace. | Current document state or lifecycle result; clearing preserves the source Markdown. |
+| `/context files\|read\|export\|delete-file` | List, read, export, or confirm deletion of managed Markdown produced by long answers, image analysis, summaries, or model notes. | Stable file IDs and bounded file content/export/deletion result. |
 
 #### Web and evaluation
 
 | Command and input | Meaning | Output / side effect |
 |---|---|---|
 | `/search <keywords>` | Search with the configured DuckDuckGo or Tavily provider. | Numbered results containing title, URL, and snippet; the numbered list is retained for the next `/fetch`. |
-| `/fetch <result-number\|url> [--category id] [--yes]` | Fetch a public page by URL or by number from the last search, preview its readable text, then optionally import it. | Title, final URL, character count, and preview; after confirmation, an import result and rebuilt index. `--yes` imports immediately. |
+| `/fetch <result-number\|url> [--category id] [--yes]` | Fetch a public page by URL or by number from the last search, preview its readable text, then optionally import it into the current knowledge base by default; `--category` overrides the target. | Title, final URL, character count, and preview; after confirmation, an import result and rebuilt index. `--yes` imports immediately. |
 | `/eval <dataset.json> [--mode keyword\|vector\|hybrid\|multimodal] [--top-k N] [--scope id] [--export]` | Run deterministic retrieval evaluation. Each JSON case requires `query`; `expected` and `expected_media` enable relevance metrics. | Progress plus summary JSON for Precision@K, Recall@K, MRR, nDCG@K, media recall, and latency. `--export` also writes the full run under exports. |
 
 #### API configuration and credentials
@@ -127,7 +171,21 @@ Commands use Windows-friendly tokenization. Wrap paths or names containing space
 | `/secret delete <name>` | Delete a stored credential. Environment overrides are not modified. | Deleted/not-stored result and service reload. |
 | `/secret test <name>` | Map a credential to its service and perform the same real probe as `/config test`. | Probe line plus credential status/code. |
 
-Credential names are `llm_api_key`, `embedding_api_key`, `vlm_api_key`, `reranker_api_key`, `mineru_api_key`, and `tavily_api_key`.
+Credential names are `llm_api_key`, `embedding_api_key`, `vlm_api_key`, `reranker_api_key`, `mineru_api_key`, `tavily_api_key`, and the optional `milvus_token`.
+
+### Milvus vector storage
+
+Both the CLI and API/SDK use Milvus. The default connection is `http://localhost:19530`, database `default`, with no authentication. API/SDK settings use the `AGR_MILVUS_*` environment variables shown in `.env.example`. AutoMemory CLI stores the non-secret `milvus_uri`, `milvus_database`, `milvus_collection`, and `milvus_timeout_seconds` fields in its config JSON; an optional token must be supplied through `AUTOMEMORY_MILVUS_TOKEN`/`AGR_MILVUS_TOKEN` or `/secret set milvus_token`.
+
+Physical collection names include a schema version and vector dimension (for example, `automemory_vectors_v1_d1536`). Existing SQLite/legacy-backend vectors are not copied. Run `/reindex` to generate missing Milvus vectors from stored chunks, or `/reindex --force` to recreate only collections managed by the configured AutoMemory prefix. If Milvus cannot be reached, vector search is marked degraded while BM25 and graph channels remain available.
+
+### Full-document Markdown workspace
+
+MinerU imports now preserve the complete Markdown beside chunks and media. Run `/doc <id>` to check availability, then `/context open <id>`. One workspace binds one document and has history isolated from direct chat, `/s`, and long-term memory. The complete Markdown is never truncated or replaced by a summary. The main LLM always performs the final reasoning; it may request one associated image at a time, in which case only that image is sent to the configured VLM and the structured result is returned to the main LLM.
+
+Defaults target a 1M-token model: 920k maximum input, compaction at 850k toward 780k, 32k output reserve and 48k safety reserve. Only mutable workspace history is summarized, with explicit summary tags and the latest six turns retained. Answers estimated above 12k tokens are stored as managed Markdown; later prompts contain a clearly incomplete 1.5k-token head/tail preview and stable file ID. AutoMemory keeps the system/document/complete-Markdown prefix deterministic to encourage provider prompt caching, but reports a cache hit only when the provider returns cached-token usage. Full-document calls can be expensive.
+
+Model file tools accept managed IDs only. They cannot traverse arbitrary paths, execute files, overwrite source Markdown/PDF/media, or modify configuration and databases.
 
 #### Process arguments and output behavior
 
@@ -349,7 +407,7 @@ pip install build
 python -m build
 pip install dist/agentic_rag-*.whl
 
-# Option 3: install all optional dependencies (torch / chromadb / unstructured, etc.)
+# Option 3: install all optional dependencies (torch / pymilvus / unstructured, etc.)
 pip install agentic-rag[all]
 ```
 
@@ -360,12 +418,12 @@ pip install agentic-rag[all]
 | `all` | Everything (equivalent to local-models + pdf + vector-db + image) |
 | `local-models` | torch, torchvision, transformers, sentence-transformers |
 | `pdf` | unstructured[pdf] |
-| `vector-db` | chromadb, qdrant-client |
+| `vector-db` | pymilvus |
 | `image` | pillow, pytesseract |
 | `table` | tabula-py, camelot-py, pandas |
 | `dev` | pytest, pytest-asyncio |
 
-Core dependencies stay lightweight (fastapi, pydantic, openai, networkx, numpy, loguru, rank-bm25, jieba) so `pip install agentic-rag` works immediately in **degraded mode**; heavy dependencies live in extras.
+Core dependencies include `pymilvus` because Milvus is the unified vector backend. If Milvus is unavailable, keyword and graph retrieval remain available in degraded mode.
 
 ---
 
@@ -387,7 +445,7 @@ print(answer)
 ### Passing configuration
 
 ```python
-rag = AgenticRAG(llm_api_key="sk-...", vector_db_path="./data/vec")
+rag = AgenticRAG(llm_api_key="sk-...", milvus_uri="http://localhost:19530")
 ```
 
 ### High-level client methods
@@ -473,8 +531,11 @@ All settings are managed by `pydantic-settings` and can be overridden via enviro
 # config.py (key settings)
 class Settings:
     # Vector DB
-    vector_db_type: str = "chroma"        # chroma | qdrant
-    vector_db_path: str = "./data/vector_db"
+    vector_db_type: str = "milvus"
+    milvus_uri: str = "http://localhost:19530"
+    milvus_database: str = "default"
+    milvus_collection: str = "agentic_rag_vectors"
+    milvus_token: str | None = None
 
     # Graph DB
     graph_db_type: str = "networkx"       # networkx | neo4j
@@ -571,7 +632,7 @@ Optional API Key auth: set `AGR_API_KEY`; requests must then carry `X-API-Key`.
 │  │ Search   │ │ Traverse │ │ (BM25)   │ │ Retrieve │          │
 │  └──────────┘ └──────────┘ └──────────┘ └──────────┘          │
 ├──────────────────────────────────────────────────────────────────┤
-│  Vector DB (ChromaDB)    │  Graph DB (NetworkX/Neo4j)           │
+│  Vector DB (Milvus)      │  Graph DB (NetworkX/Neo4j)           │
 │  Embedding Models        │  LLM (OpenAI/LiteLLM)                │
 │  Reranker Models         │  Document Parsers                    │
 └──────────────────────────────────────────────────────────────────┘

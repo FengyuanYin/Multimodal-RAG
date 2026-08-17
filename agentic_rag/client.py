@@ -22,7 +22,7 @@ class AgenticRAG:
         """
         Args:
             config: 配置覆盖字典（键名与 agentic_rag.config.Settings 字段一致，
-                    如 {"llm_api_key": "...", "vector_db_path": "./data/vec"}）
+                    如 {"llm_api_key": "...", "milvus_uri": "http://localhost:19530"}）
             **kwargs: 便捷写法，等价于传入 config（如 llm_api_key="..."）
         """
         self._config = dict(config or {})

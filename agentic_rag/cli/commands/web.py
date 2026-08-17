@@ -18,7 +18,7 @@ def search(ctx, args, output, cancel, router):
 
 def fetch(ctx, args, output, cancel, router):
     args = list(args)
-    category = str(pop_option(args, "--category", "default"))
+    category = str(pop_option(args, "--category", ctx.config.active_category))
     yes = pop_flag(args, "--yes")
     require_count(args, 1, "/fetch <result-number|url> [--category id] [--yes]")
     target = args[0]

@@ -51,6 +51,24 @@ class CommandSpec:
     handler: Callable[..., "CommandResult"]
     aliases: tuple[str, ...] = ()
     group: str = "General"
+    primary: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class RagPreset:
+    name: str
+    description: str
+    channels: frozenset[str]
+    rewrite_queries: bool = False
+    rerank: bool = False
+    top_k: int = 5
+    candidate_k: int = 25
+    chunk_size: int = 800
+    chunk_overlap: int = 120
+    window_before: int = 0
+    window_after: int = 0
+    graph_depth: int = 0
+    rewrite_limit: int = 1
 
 
 @dataclass(slots=True)
@@ -147,6 +165,10 @@ class RetrievalHit:
     score: float
     channel_scores: dict[str, float] = field(default_factory=dict)
     media_refs: list[dict[str, Any]] = field(default_factory=list)
+    window_before: list[dict[str, Any]] = field(default_factory=list)
+    window_after: list[dict[str, Any]] = field(default_factory=list)
+    graph_paths: list[dict[str, Any]] = field(default_factory=list)
+    visual_evidence: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -156,11 +178,89 @@ class RetrievalResult:
 
 
 @dataclass(slots=True)
+class GraphNodeRecord:
+    id: str
+    knowledge_base_id: str
+    graph_kind: str
+    node_type: str
+    label: str
+    document_id: str | None = None
+    page: int | None = None
+    evidence_chunk_id: str | None = None
+    properties: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class GraphEdgeRecord:
+    id: str
+    knowledge_base_id: str
+    graph_kind: str
+    source_id: str
+    target_id: str
+    relation_type: str
+    document_id: str | None = None
+    evidence_chunk_id: str | None = None
+    properties: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class GraphExportResult:
+    png_path: Path
+    metadata_path: Path
+    graph_kind: str
+    original_nodes: int
+    original_edges: int
+    exported_nodes: int
+    exported_edges: int
+    truncated: bool = False
+
+
+@dataclass(slots=True)
 class ParsedDocument:
     title: str
     pages: list[dict[str, Any]]
     media: list[dict[str, Any]] = field(default_factory=list)
     parser: str = "local"
+    markdown: str = ""
+    markdown_source: Literal["mineru_original", "generated", "none"] = "none"
+    markdown_media_refs: list[dict[str, str]] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentArtifactRecord:
+    id: str
+    document_id: str
+    artifact_type: str
+    relative_path: str
+    mime_type: str
+    source: str
+    checksum: str
+    byte_size: int
+
+
+@dataclass(frozen=True, slots=True)
+class ContextBudget:
+    context_limit: int
+    hard_input_limit: int
+    fixed_prefix_tokens: int
+    summary_tokens: int = 0
+    recent_history_tokens: int = 0
+    tool_tokens: int = 0
+    question_tokens: int = 0
+    output_reserve_tokens: int = 0
+    safety_reserve_tokens: int = 0
+    estimator: str = "conservative-v1"
+    requires_compaction: bool = False
+
+
+@dataclass(slots=True)
+class ModelStreamEvent:
+    kind: Literal["text_delta", "tool_call", "usage"]
+    text: str = ""
+    tool_call_id: str = ""
+    tool_name: str = ""
+    arguments: dict[str, Any] = field(default_factory=dict)
+    usage: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

@@ -44,6 +44,50 @@ Configure LLM chat?
 
 最终确认前，所有值只保存在内存中；向导支持 `back`、`skip` 和 `cancel`。保存后可执行真实、低成本连接测试，并区分认证、余额/限流、网络、模型和响应格式错误。测试失败不会删除已经确认的配置。
 
+### Milvus 向量存储
+
+CLI 与 API/SDK 统一使用 Milvus。默认连接为 `http://localhost:19530`、数据库 `default`、无认证。API/SDK 通过 `.env.example` 中的 `AGR_MILVUS_*` 环境变量配置；AutoMemory CLI 只把 `milvus_uri`、`milvus_database`、`milvus_collection` 和 `milvus_timeout_seconds` 等非敏感字段保存到配置 JSON。可选 token 必须通过 `AUTOMEMORY_MILVUS_TOKEN` / `AGR_MILVUS_TOKEN` 或 `/secret set milvus_token` 安全提供。
+
+物理集合名包含 schema 版本和向量维度，例如 `automemory_vectors_v1_d1536`。SQLite 或旧后端中的向量不会直接复制；运行 `/reindex` 可从已保存 Chunk 补建缺失向量，运行 `/reindex --force` 只会重建当前 AutoMemory 前缀管理的集合。Milvus 不可连接时，向量通道会标记为 degraded，BM25 与图检索仍可继续使用。
+
+### 推荐工作流与固定 RAG 模式
+
+```text
+/setup
+/mode balanced
+/kb create "我的研报"
+/add "D:\资料\论文.pdf"
+/docs
+/s 论文提出了什么方法？
+```
+
+`/mode` 只提供四种产品预设，分块、候选数、融合参数和窗口大小由程序固定，用户不再需要自己拼装算法：
+
+| 模式 | 检索链路 |
+|---|---|
+| `fast` | 仅 BM25，最快且不需要 Embedding API。 |
+| `balanced` | BM25 + 云 Embedding；新安装的默认模式。 |
+| `multimodal` | Balanced + 图片、表格、描述以及文档—页面—媒体引用图。 |
+| `advanced` | 查询重写、BM25、Embedding、多模态、实体 GraphRAG、引用图、稳定 RRF 融合、云 Rerank、Rerank 后 VLM 图片路由，最后扩展常规 Chunk 的前后上下文；不会额外建立小 Chunk 索引。 |
+
+### 节省成本的 Advanced VLM 路由
+
+自动图片理解只属于 `advanced`。AutoMemory 会先完成召回、融合、云 Rerank 和最终 top-k 截取，然后处理这些最终 Chunk 引用的全部去重图片；图片数量不设上限，但被 Rerank 淘汰的候选图片不会产生 VLM 调用，已经缓存的图片也不会重复调用。
+
+每张未缓存图片优先只调用一次 VLM，同时完成分类与重构：数据图输出 Markdown 表格，结构图输出 Mermaid 文本，其他图片输出基于可见事实的视觉描述。只有图表表格或 Mermaid 格式校验失败时，才增加一次通用视觉理解调用。成功结果按媒体校验和、VLM 配置指纹和 prompt 版本持久化；单张图片失败只记录在 `trace.advanced_vlm`，不会丢弃已经选出的文本证据。
+
+`/kb` 列出知识库；`/kb create <名称>` 创建并自动选中；`/kb use <ID或名称>` 切换；`/kb rename ...` 重命名；`/kb delete ...` 确认后删除。`/add`、`/docs`、`/remove`、`/s` 和 `/graph` 始终使用当前知识库。升级前已有 category 会原样显示为知识库。
+
+Advanced 双图谱可在无 GUI 的终端中导出：
+
+```text
+/graph
+/graph entity 实体图.png
+/graph reference 引用图.png
+```
+
+每次导出会在 AutoMemory exports 目录生成 Matplotlib PNG 和同名 JSON 溯源文件。图过大时输出确定性可读子图，并报告原图与导出图的节点、边数量。
+
 ### 对话与命令
 
 命令采用兼容 Windows 路径的参数解析。路径或名称包含空格时用双引号包裹。ID 可以填写能够唯一匹配的前缀；`[方括号]` 表示可选参数；`--force` 和 `--yes` 用于跳过交互确认。
@@ -53,14 +97,14 @@ Configure LLM chat?
 | 输入 | 含义 | 产出 |
 |---|---|---|
 | `<消息>` | 直接与云端 LLM 对话，不检索知识库。 | 流式回答；用户消息与助手回答写入当前会话。 |
-| `/s <问题>` | 按当前检索模式搜索本地知识库，再携带检索上下文调用云端 LLM。`/s` 必须是消息开头精确的小写首个单词。 | 流式、有依据的回答、编号来源；本次检索轨迹可通过 `/trace` 查看。 |
+| `/s <问题>` | 使用当前固定模式、只搜索当前知识库，再携带检索上下文调用云端 LLM。`/s` 必须是消息开头精确的小写首个单词。 | 流式、有依据的回答、编号来源；本次检索轨迹可通过 `/trace` 查看。 |
 
 #### 核心与诊断
 
 | 命令与输入 | 含义 | 产出/副作用 |
 |---|---|---|
-| `/help [命令]` 或 `/? [命令]` | 列出全部命令，或查看某个命令的用法。 | 按分组排列的命令列表，或单个命令的 Usage。 |
-| `/version` | 查看当前运行版本。 | `AutoMemory 0.3.0`。 |
+| `/help`、`/help all` 或 `/help <命令>` | 分别显示十个主要入口、全部兼容命令或单个命令用法。 | 默认精简视图或完整高级命令列表。 |
+| `/version` | 查看当前运行版本。 | `AutoMemory 0.4.0`。 |
 | `/diagnose [--errors]` | 检查本地数据库、数据目录、云凭据是否已配置以及 CLI 依赖；`--errors` 追加当前进程最近的脱敏错误。 | 每项输出 `OK`、`DEGRADED` 或 `ERROR`；不显示密钥，也不会调用服务商 API。 |
 | `/path` | 查看当前进程使用的隔离数据目录。 | Home、exports 和 logs 的绝对路径。 |
 | `/exit` 或 `/quit` | 当前命令返回后安全关闭 REPL。 | 正常退出进程，并关闭数据库和网络客户端。 |
@@ -84,25 +128,31 @@ Configure LLM chat?
 
 | 命令与输入 | 含义 | 产出/副作用 |
 |---|---|---|
-| `/add <路径> [更多路径...] [--category ID] [--vlm]` | 导入一个或多个本地 PDF、文本/Markdown、图片或表格文件。`--vlm` 使用已配置的云端视觉模型描述抽取图片。 | 解析、分块、嵌入进度；每个文件的导入或重复结果；随后重建检索索引。 |
-| `/docs [--category ID]` | 列出全部文档，或只显示某个分类。 | 文档 ID、标题、来源类型/解析器、状态、chunk/media 数量和分类。 |
+| `/mode [fast\|balanced\|multimodal\|advanced]` | 列出或切换固定 RAG 预设。 | 持久化当前模式，并显示必要派生索引的准备进度。 |
+| `/kb [list\|create\|use\|rename\|delete] ...` | 管理并选择知识库；创建后自动选中。 | 知识库 ID、名称、文档数和当前标记。 |
+| `/add <路径> [更多路径...] [--vlm]` | 向当前知识库导入 PDF、文本/Markdown、图片或表格。 | 解析、分块、索引进度及每个文件的结果。 |
+| `/docs` | 只列出当前知识库文档。 | 文档 ID、标题、解析器、状态和 chunk/media 数量。 |
 | `/doc <文档ID>` | 通过完整 ID 或唯一前缀查看单个文档。 | 标题、来源、解析器、状态、页数、chunk 数和 media 数。 |
-| `/remove <文档ID> [--force]` | 删除文档、chunk、嵌入和已保存媒体，并重建索引。 | 未强制时先确认，随后输出被删除的文档 ID。 |
-| `/category` 或 `/category list` | 列出知识分类。 | 分类 ID 和名称。 |
+| `/remove <文档ID> [--force]` | 删除当前库文档、Chunk、Embedding、双图谱记录和媒体。 | 未强制时先确认，随后输出被删除的文档 ID。 |
+| `/graph [entity\|reference\|combined] [文件名.png]` | 使用 Matplotlib Agg 导出当前知识库图谱。 | PNG、同名溯源 JSON 和图规模统计。 |
+| `/category` 或 `/category list` | 底层分类的旧版兼容入口；新用户优先使用 `/kb`。 | 分类 ID 和名称。 |
 | `/category add <名称>` | 新建分类。 | 新分类 ID 和名称。 |
 | `/category rename <ID> <名称>` | 重命名分类。 | 已重命名的分类 ID。 |
 | `/category delete <ID> [--force]` | 删除空分类；需要先删除或迁移其中的文档。 | 未强制时先确认，随后输出已删除分类 ID。 |
-| `/reindex` | 根据已保存 chunk 重建派生的关键词索引。 | 已索引的 chunk 数量；不会重新解析源文件。 |
+| `/reindex [--force]` | 根据已保存 Chunk 重建关键词与 Milvus 向量索引；`--force` 只重建 AutoMemory 管理的 Milvus 集合。 | 关键词数量和向量 ready/degraded 统计；不会重新解析源文件。 |
 | `/trace` | 查看当前进程最近一次 `/s` 检索详情。 | 包含检索模式、通道、分数、降级路径和范围的 JSON；尚未检索时输出提示。 |
 | `/export <媒体ID> [文件名]` | 将知识库媒体复制到 AutoMemory exports 目录。 | 导出文件绝对路径；可选文件名会经过安全清理。 |
-| `/mineru <PDF路径> [--category ID] [--selfhost]` | 使用已配置的 MinerU 解析 PDF；`--selfhost` 只对本次命令强制使用自托管模式。 | 上传、轮询、下载、入库进度，导入摘要、任务状态和重建后的索引。 |
+| `/mineru <PDF路径> [--category ID] [--selfhost]` | 使用已配置的 MinerU 解析 PDF，默认导入当前知识库；`--category` 可覆盖目标知识库，`--selfhost` 只对本次命令强制使用自托管模式。 | 上传、轮询、下载、入库进度，导入摘要、任务状态和重建后的索引。 |
+| `/context open <文档ID>` | 把一份 MinerU 文档作为独立的完整 Markdown 工作区。随后普通消息由主 LLM读取完整原文；`/s` 仍表示知识库检索。 | 工作区 ID、Markdown 来源/大小、文档和主模型。 |
+| `/context status\|leave\|clear` | 查看、离开或清空当前全文工作区。 | 当前文档状态或生命周期结果；清空不会删除源 Markdown。 |
+| `/context files\|read\|export\|delete-file` | 列出、读取、导出或确认删除长回答、图片分析、摘要和模型笔记产生的受管 Markdown。 | 稳定文件 ID、有界正文、导出路径或删除结果。 |
 
 #### Web 与评估
 
 | 命令与输入 | 含义 | 产出/副作用 |
 |---|---|---|
 | `/search <关键词>` | 使用当前 DuckDuckGo 或 Tavily 服务搜索互联网。 | 带编号的标题、URL 和摘要；编号结果会保留给下一次 `/fetch` 使用。 |
-| `/fetch <结果编号\|URL> [--category ID] [--yes]` | 按上次搜索编号或公开 URL 抓取网页，预览正文，再选择是否入库。 | 标题、最终 URL、字符数和正文预览；确认后输出导入结果并重建索引。`--yes` 表示直接导入。 |
+| `/fetch <结果编号\|URL> [--category ID] [--yes]` | 按上次搜索编号或公开 URL 抓取网页，预览正文，再选择是否入库；默认导入当前知识库，`--category` 可覆盖目标。 | 标题、最终 URL、字符数和正文预览；确认后输出导入结果并重建索引。`--yes` 表示直接导入。 |
 | `/eval <数据集.json> [--mode keyword\|vector\|hybrid\|multimodal] [--top-k N] [--scope ID] [--export]` | 执行确定性的检索评估。每条 JSON 至少需要 `query`；`expected` 和 `expected_media` 用于计算相关性指标。 | 进度，以及 Precision@K、Recall@K、MRR、nDCG@K、媒体召回率和延迟的汇总 JSON；`--export` 还会把完整结果写入 exports。 |
 
 #### API 配置与凭据
@@ -121,6 +171,14 @@ Configure LLM chat?
 | `/secret test <名称>` | 将凭据映射到对应服务，执行与 `/config test` 相同的真实探测。 | 探测结果以及凭据状态码。 |
 
 凭据名称包括：`llm_api_key`、`embedding_api_key`、`vlm_api_key`、`reranker_api_key`、`mineru_api_key`、`tavily_api_key`。
+
+### 完整 Markdown 文档工作区
+
+MinerU 导入现在会在 Chunk 和媒体之外保存完整 Markdown。先用 `/doc <ID>` 检查状态，再运行 `/context open <ID>`。一个工作区只绑定一篇文档，其历史与普通聊天、`/s` 和长期记忆隔离。完整 Markdown 永远不会被截断或用摘要替代。最终推理始终由主 LLM完成；主 LLM需要图片时才请求一张关联图片，系统只把该图片交给 VLM，并把结构化结果返回主 LLM。
+
+默认超参数面向 1M Token 模型：最大输入 920k，达到 850k 时压缩到 780k，输出预留 32k，安全余量 48k。系统只摘要可变工作区历史，使用明确摘要标签并保留最近六轮原始对话。估算超过 12k Token 的回答保存为受管 Markdown；后续上下文只保留明确标注为不完整的首尾各 1.5k Token 预览和稳定文件 ID。AutoMemory 保持“系统提示—文档身份—完整 Markdown”前缀稳定以尽量利用 Prompt Caching，但只有提供商返回 cached token 用量时才报告命中。全文调用可能产生较高 Token 费用。
+
+模型文件工具只接受受管 ID，不能遍历任意路径、执行文件、覆盖源 Markdown/PDF/媒体或修改配置和数据库。
 
 #### 启动参数与输出约定
 
@@ -207,7 +265,7 @@ agenticrag\Scripts\activate
 # 安装 wheel（已生成于 dist/ 目录）
 pip install dist/agentic_rag-0.1.0-py3-none-any.whl
 
-# 或安装完整能力（含 torch / chromadb / unstructured 等可选依赖）
+# 或安装完整能力（含 torch / pymilvus / unstructured 等可选依赖）
 pip install "dist/agentic_rag-0.1.0-py3-none-any.whl[all]"
 ```
 
@@ -235,7 +293,7 @@ pip install "agentic-rag[all]"
 |------|------|------|
 | `all` | 全部可选 | 完整能力 |
 | `local-models` | torch, transformers, sentence-transformers | 本地嵌入/重排序模型 |
-| `vector-db` | chromadb, qdrant-client | 向量数据库 |
+| `vector-db` | pymilvus | 向量数据库 |
 | `pdf` | unstructured[pdf] | PDF 深度解析 |
 | `image` | pillow, pytesseract | 图片 OCR |
 | `table` | tabula-py, camelot-py, pandas | 表格解析 |
@@ -286,7 +344,7 @@ print("路由:", ans["route"], "置信度:", ans["confidence"])
 rag = AgenticRAG(
     llm_api_key="sk-xxx",              # 启用 LLM（意图分类/答案生成/实体抽取）
     embedding_model="BAAI/bge-m3",     # 本地嵌入模型
-    vector_db_path="./data/vector_db", # 向量库路径
+    milvus_uri="http://localhost:19530", # 本地 Milvus 地址
     graph_db_type="networkx",          # 图存储类型
 )
 ```
@@ -417,8 +475,11 @@ ranked = reranker.rerank("深度智能公司", docs, top_k=5)
 | `AGR_EMBEDDING_MODEL` | `BAAI/bge-m3` | 嵌入模型（本地 BGE 或 OpenAI） |
 | `AGR_EMBEDDING_DEVICE` | `cpu` | 嵌入模型设备 |
 | `AGR_RERANKER_MODEL` | `BAAI/bge-reranker-v2-m3` | 重排序模型 |
-| `AGR_VECTOR_DB_TYPE` | `chroma` | 向量库：`chroma` / `qdrant` |
-| `AGR_VECTOR_DB_PATH` | `./data/vector_db` | ChromaDB 持久化路径 |
+| `AGR_VECTOR_DB_TYPE` | `milvus` | 统一向量库后端 |
+| `AGR_MILVUS_URI` | `http://localhost:19530` | Milvus 服务地址 |
+| `AGR_MILVUS_DATABASE` | `default` | Milvus 数据库 |
+| `AGR_MILVUS_COLLECTION` | `agentic_rag_vectors` | 集合前缀；程序按向量维度追加后缀 |
+| `AGR_MILVUS_TOKEN` | - | 可选认证 token；不要写入普通日志 |
 | `AGR_GRAPH_DB_TYPE` | `networkx` | 图库：`networkx` / `neo4j` |
 | `AGR_NEO4J_URI` | - | Neo4j 连接（使用 Neo4j 时配置） |
 | `AGR_API_HOST` / `AGR_API_PORT` | `0.0.0.0` / `8000` | 服务地址 |
@@ -522,7 +583,7 @@ print(resp.json()["answer"])
 │  │向量检索   │ │图遍历检索 │ │关键词检索 │ │混合检索   │      │
 │  └──────────┘ └──────────┘ └──────────┘ └──────────┘      │
 ├──────────────────────────────────────────────────────────────┤
-│  Vector DB (ChromaDB)    │  Graph DB (NetworkX/Neo4j)       │
+│  Vector DB (Milvus)      │  Graph DB (NetworkX/Neo4j)       │
 │  Embedding Models        │  LLM (OpenAI/LiteLLM)            │
 │  Reranker Models         │  Document Parsers                │
 └──────────────────────────────────────────────────────────────┘

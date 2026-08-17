@@ -90,6 +90,10 @@ class HttpTransport:
                 cancel.checkpoint()
             time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
 
+    def wait(self, seconds: float, cancel: CancellationToken | None = None) -> None:
+        """Wait between rate-limited requests while remaining cancellable."""
+        self._sleep(max(0.0, seconds), cancel)
+
     def _backoff(self, response: httpx.Response, attempt: int, cancel: CancellationToken | None) -> None:
         try:
             seconds = min(float(response.headers.get("retry-after", "0") or 0), 10.0)

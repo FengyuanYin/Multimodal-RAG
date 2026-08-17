@@ -17,9 +17,19 @@ class PlainTerminal:
         ansi_capable = sys.platform != "win32" or bool(os.getenv("WT_SESSION") or os.getenv("ANSICON") or os.getenv("TERM"))
         self.interactive, self.color = interactive, color and ansi_capable and os.getenv("TERM", "").lower() != "dumb" and not bool(os.getenv("NO_COLOR"))
         self._delta_open = False
+        self._progress_open = False
+        self._progress_width = 0
+
+    def _close_progress(self) -> None:
+        if self._progress_open:
+            self.stderr.write("\n")
+            self.stderr.flush()
+            self._progress_open = False
+            self._progress_width = 0
 
     def emit(self, event: OutputEvent) -> None:
         if event.kind == EventKind.DELTA:
+            self._close_progress()
             self.stdout.write(event.text)
             self.stdout.flush()
             self._delta_open = True
@@ -30,27 +40,45 @@ class PlainTerminal:
             self._delta_open = False
         if event.kind == EventKind.PROGRESS:
             if self.interactive:
-                suffix = f" [{event.completed}/{event.total}]" if event.total else ""
-                self.stderr.write(f"[{event.phase or 'working'}] {event.text}{suffix}\n")
+                if event.total:
+                    completed = max(0, min(int(event.completed), int(event.total)))
+                    percent = int(completed * 100 / event.total)
+                    filled = min(24, int(percent * 24 / 100))
+                    bar = "#" * filled + "-" * (24 - filled)
+                    line = f"[{event.phase or 'working'}] [{bar}] {completed}/{event.total} {percent:3d}%"
+                    padded = line.ljust(max(self._progress_width, len(line)))
+                    self.stderr.write("\r" + padded)
+                    self._progress_width = max(self._progress_width, len(line))
+                    self._progress_open = completed < event.total
+                    if not self._progress_open:
+                        self.stderr.write("\n")
+                        self._progress_width = 0
+                else:
+                    self._close_progress()
+                    self.stderr.write(f"[{event.phase or 'working'}] {event.text}\n")
                 self.stderr.flush()
         elif event.kind == EventKind.SOURCES:
             self.write_sources(event.data or [])
         elif event.kind in {EventKind.WARNING, EventKind.ERROR}:
+            self._close_progress()
             self.stderr.write(f"[{event.code or event.kind.value}] {event.text}\n")
             self.stderr.flush()
         elif event.text:
+            self._close_progress()
             self.stdout.write(event.text + ("" if event.text.endswith("\n") else "\n"))
             self.stdout.flush()
 
     def write_sources(self, sources: list[dict]) -> None:
         if not sources:
             return
+        self._close_progress()
         self.stdout.write("\nSources:\n")
         for source in sources:
             self.stdout.write(f"  [{source.get('index','?')}] {source.get('document','document')} | page {source.get('page',1)} | {source.get('modality','text')} | score {float(source.get('score',0)):.4f}\n")
         self.stdout.flush()
 
     def write_error(self, error: Exception, *, debug: bool = False) -> None:
+        self._close_progress()
         if self._delta_open:
             self.stdout.write("\n")
             self._delta_open = False

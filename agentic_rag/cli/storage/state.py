@@ -16,7 +16,7 @@ from ..security import looks_sensitive_text
 from .migrations import connect_database, migrate
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MIGRATIONS = {
     1: """
     CREATE TABLE metadata(key TEXT PRIMARY KEY, value_json TEXT NOT NULL, updated_at REAL NOT NULL);
@@ -41,6 +41,36 @@ MIGRATIONS = {
       summary_json TEXT NOT NULL DEFAULT '{}', created_at REAL NOT NULL, updated_at REAL NOT NULL
     );
     """,
+    2: """
+    CREATE TABLE document_workspaces(
+      id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+      document_id TEXT NOT NULL, markdown_artifact_id TEXT NOT NULL, markdown_checksum TEXT NOT NULL,
+      main_model_fingerprint TEXT NOT NULL, prompt_version TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL CHECK(status IN ('ready','stale','deleted')), created_at REAL NOT NULL, updated_at REAL NOT NULL,
+      UNIQUE(conversation_id,document_id)
+    );
+    CREATE UNIQUE INDEX idx_workspace_one_active ON document_workspaces(conversation_id) WHERE active=1;
+    CREATE TABLE workspace_events(
+      id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES document_workspaces(id) ON DELETE CASCADE,
+      sequence INTEGER NOT NULL, role TEXT NOT NULL CHECK(role IN ('user','assistant','tool','system')),
+      event_kind TEXT NOT NULL, content TEXT NOT NULL, file_id TEXT,
+      status TEXT NOT NULL CHECK(status IN ('streaming','complete','interrupted','error')),
+      metadata_json TEXT NOT NULL DEFAULT '{}', created_at REAL NOT NULL, updated_at REAL NOT NULL,
+      UNIQUE(workspace_id,sequence)
+    );
+    CREATE TABLE workspace_files(
+      id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES document_workspaces(id) ON DELETE CASCADE,
+      file_kind TEXT NOT NULL, relative_path TEXT NOT NULL, display_name TEXT NOT NULL, checksum TEXT NOT NULL,
+      byte_size INTEGER NOT NULL, token_estimate INTEGER NOT NULL, purpose TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('ready','unavailable','deleted')),
+      metadata_json TEXT NOT NULL DEFAULT '{}', created_at REAL NOT NULL, updated_at REAL NOT NULL
+    );
+    CREATE TABLE workspace_tool_cache(
+      cache_key TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES document_workspaces(id) ON DELETE CASCADE,
+      tool_name TEXT NOT NULL, result_file_id TEXT REFERENCES workspace_files(id), result_text TEXT NOT NULL,
+      created_at REAL NOT NULL, last_used_at REAL NOT NULL
+    );
+    """,
 }
 
 
@@ -50,6 +80,8 @@ class StateRepository:
         self._lock = RLock()
         self._conn = connect_database(path)
         migrate(self._conn, path, backups_dir, SCHEMA_VERSION, MIGRATIONS)
+        from .document_workspaces import DocumentWorkspaceRepository
+        self.workspaces = DocumentWorkspaceRepository(self._conn, self.transaction, self._now)
         self.recover_incomplete()
 
     @contextmanager
@@ -237,7 +269,8 @@ class StateRepository:
             messages = db.execute("UPDATE messages SET status='interrupted',updated_at=? WHERE status='streaming'", (now,)).rowcount
             tasks = db.execute("UPDATE tasks SET status='cancelled',updated_at=? WHERE status IN ('pending','running')", (now,)).rowcount
             evaluations = db.execute("UPDATE evaluations SET status='cancelled',updated_at=? WHERE status='running'", (now,)).rowcount
-        return {"messages": messages, "tasks": tasks, "evaluations": evaluations}
+            workspace_events = db.execute("UPDATE workspace_events SET status='interrupted',updated_at=? WHERE status='streaming'", (now,)).rowcount
+        return {"messages": messages, "tasks": tasks, "evaluations": evaluations, "workspace_events": workspace_events}
 
     def integrity_check(self) -> str:
         row = self._conn.execute("PRAGMA integrity_check").fetchone()

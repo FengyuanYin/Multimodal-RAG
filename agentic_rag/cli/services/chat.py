@@ -71,8 +71,9 @@ class GroundedChatService:
         self.state, self.llm_client, self.config, self.retriever = state, llm_client, config, retriever
         self._direct_core = DirectChatService(state, llm_client, config)
 
-    def stream(self, conversation_id: str, question: str, output, cancel: CancellationToken, scope: str = "all") -> dict:
-        result = self.retriever.search(question, scope, self.config.retrieval_mode, self.config.top_k, cancel)
+    def stream(self, conversation_id: str, question: str, output, cancel: CancellationToken, scope: str | None = None) -> dict:
+        scope = scope or self.config.active_category
+        result = self.retriever.search(question, scope, self.config.rag_mode, 0, cancel)
         if not result.hits:
             answer = "No matching evidence was found in the selected knowledge scope."
             self.state.append_message(conversation_id, "user", question, "rag", "complete")
@@ -82,9 +83,19 @@ class GroundedChatService:
         sources = []
         blocks = []
         for index, hit in enumerate(result.hits, 1):
-            source = {"index": index, "target_id": hit.target_id, "document_id": hit.document_id, "document": hit.document, "page": hit.page, "score": hit.score, "modality": hit.modality, "media_refs": hit.media_refs, "text": hit.text}
+            source = {"index": index, "target_id": hit.target_id, "document_id": hit.document_id, "document": hit.document, "page": hit.page, "score": hit.score, "modality": hit.modality, "media_refs": hit.media_refs, "visual_evidence": hit.visual_evidence, "text": hit.text, "window_before": [{"id":x["id"],"page":x["page"]} for x in hit.window_before], "window_after": [{"id":x["id"],"page":x["page"]} for x in hit.window_after], "graph_paths": hit.graph_paths}
             sources.append(source)
-            blocks.append(f"[{index}] Document: {hit.document}; page: {hit.page}; modality: {hit.modality}\n{hit.text}")
+            before = "\n".join(item["text"] for item in hit.window_before)
+            after = "\n".join(item["text"] for item in hit.window_after)
+            graph = "\n".join(f"{item.get('source','')} --[{item.get('relation','')}]--> {item.get('target','')}" for item in hit.graph_paths)
+            media = "\n".join(f"Media {item.get('label','')}: {item.get('reason','')}" for item in hit.media_refs)
+            visual = "\n\n".join(
+                f"Media {item.get('media_id','')} [{item.get('image_type','')}/{item.get('representation','')}"
+                f"; fallback={str(bool(item.get('fallback_used'))).lower()}]:\n{item.get('content','')}"
+                f"\nUncertainty: {item.get('uncertainty','')}"
+                for item in hit.visual_evidence
+            )
+            blocks.append(f"[{index}] Document: {hit.document}; page: {hit.page}; modality: {hit.modality}\nWindow before:\n{before}\nCENTER EVIDENCE:\n{hit.text}\nWindow after:\n{after}\nGraph evidence:\n{graph}\nMedia evidence:\n{media}\nPost-rerank VLM evidence:\n{visual}")
         system = "You are AutoMemory, a rigorous document assistant. Answer only from supplied evidence. Cite every factual claim with [n]. If evidence is insufficient, say so. Never invent a citation."
         user_content = "Evidence:\n\n" + "\n\n".join(blocks) + f"\n\nQuestion: {question}"
         return self._direct_core._stream(
@@ -96,5 +107,5 @@ class GroundedChatService:
             system=system,
             user_content=user_content,
             sources=sources,
-            extra_metadata={"retrieval_trace": result.trace},
+            extra_metadata={"retrieval_trace": result.trace, "knowledge_base": scope, "rag_mode": self.config.rag_mode},
         )

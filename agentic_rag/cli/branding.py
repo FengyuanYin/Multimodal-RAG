@@ -37,10 +37,11 @@ def sanitize_summary(value: str) -> str:
     return value[:100]
 
 
-def render_startup_banner(*, width: int, color: bool, version: str, llm_summary: str, needs_setup: bool) -> str:
+def render_startup_banner(*, width: int, color: bool, version: str, llm_summary: str, needs_setup: bool, knowledge_base: str = "default", rag_mode: str = "balanced") -> str:
     logo = FULL_LOGO if width >= max(len(line) for line in FULL_LOGO) else (COMPACT_LOGO,)
     rendered = [_gradient_line(line) for line in logo] if color else [line.rstrip() for line in logo]
     rendered.append(f"AutoMemory {sanitize_summary(version)} | {sanitize_summary(llm_summary)}")
+    rendered.append(f"Knowledge base: {sanitize_summary(knowledge_base)} | RAG mode: {sanitize_summary(rag_mode)}")
     if needs_setup:
         rendered.append("LLM is not configured. Run /setup to connect a cloud API.")
     rendered.append("Type normally to chat | /s <question> for knowledge | /help for commands")

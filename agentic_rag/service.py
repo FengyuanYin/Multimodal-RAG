@@ -169,6 +169,10 @@ def ingest_documents(
                     records.append(VectorRecord(
                         id=chunk.chunk_id,
                         vector=embedding,
+                        namespace="api",
+                        document_id=parsed.doc_id,
+                        knowledge_base_id=str(doc_item.get("collection") or "default"),
+                        profile_fingerprint="api-default",
                         payload={
                             "content": chunk.content,
                             "doc_id": chunk.doc_id,

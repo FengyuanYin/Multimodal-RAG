@@ -19,6 +19,7 @@ ENV_NAMES = {
     "reranker_api_key": ("AUTOMEMORY_RERANKER_API_KEY", "COHERE_API_KEY"),
     "mineru_api_key": ("AUTOMEMORY_MINERU_API_KEY", "MINERU_API_KEY"),
     "tavily_api_key": ("AUTOMEMORY_TAVILY_API_KEY", "TAVILY_API_KEY"),
+    "milvus_token": ("AUTOMEMORY_MILVUS_TOKEN", "AGR_MILVUS_TOKEN"),
 }
 
 
